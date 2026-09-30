@@ -1,4 +1,4 @@
-/* 网络联调入口：不初始化 GPIO/I2C/HX711/PCA9685，不执行任何真实输出。 */
+/* 网络联调入口：仅在私有配置显式启用时探测单路 HX711 原始计数；永不驱动泵/PCA9685。 */
 #include <inttypes.h>
 #include <math.h>
 #include <stdbool.h>
@@ -21,6 +21,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
+#include "hx711.h"
+#include "hx711_board.h"
 #include "nvs_flash.h"
 
 #if __has_include("web_client.local.h")
@@ -32,6 +34,15 @@
 #define WEB_CLIENT_DEVICE_ID "esp32-001"
 #define WEB_CLIENT_DEVICE_TOKEN ""
 #define WEB_CLIENT_SERIAL_TEST 0
+#define WEB_CLIENT_HX711_PROBE_CHANNEL -1
+#endif
+
+#ifndef WEB_CLIENT_HX711_PROBE_CHANNEL
+#define WEB_CLIENT_HX711_PROBE_CHANNEL -1
+#endif
+
+#if WEB_CLIENT_HX711_PROBE_CHANNEL < -1 || WEB_CLIENT_HX711_PROBE_CHANNEL >= HX711_BOARD_SCALE_COUNT
+#error WEB_CLIENT_HX711_PROBE_CHANNEL must be -1 or 0..8
 #endif
 
 #define CONNECTED_BIT BIT0
@@ -58,6 +69,41 @@ typedef struct {
 static serial_channel_t s_serial_channels[9];
 static bool s_serial_test_enabled;
 static portMUX_TYPE s_sample_lock = portMUX_INITIALIZER_UNLOCKED;
+
+#if WEB_CLIENT_HX711_PROBE_CHANNEL >= 0
+/////////////////////////////////////////////////////////////////////////////
+// 函数名：hx711_probe_task
+// 作用：对一台已确认电平与接线的 HX711 周期性打印原始 ADC 计数。
+// 参数1：arg，未使用。
+// 用于：仅本机串口台架诊断；不会进入网络称重遥测或执行器控制。
+// 使用示例：由 app_main 在 WEB_CLIENT_HX711_PROBE_CHANNEL=0 时创建。
+/////////////////////////////////////////////////////////////////////////////
+static void hx711_probe_task(void *arg) {
+    (void)arg;
+    hx711_t scale = {0};
+    const hx711_pin_pair_t pins = hx711_board_pins[WEB_CLIENT_HX711_PROBE_CHANNEL];
+    esp_err_t err = hx711_init(&scale, pins.dout_gpio, pins.sck_gpio);
+    if (err != ESP_OK) {
+        ESP_LOGE("hx711_probe", "init failed: %s", esp_err_to_name(err));
+        vTaskDelete(NULL);
+        return;
+    }
+    ESP_LOGI("hx711_probe", "channel=%d DOUT=GPIO%d SCK=GPIO%d raw ADC counts only",
+             WEB_CLIENT_HX711_PROBE_CHANNEL, (int)pins.dout_gpio, (int)pins.sck_gpio);
+    for (;;) {
+        int32_t raw = 0;
+        err = hx711_read(&scale, 300, &raw);
+        if (err == ESP_OK) {
+            ESP_LOGI("hx711_probe", "CH%02d raw=%" PRId32 " counts (uncalibrated)",
+                     WEB_CLIENT_HX711_PROBE_CHANNEL, raw);
+        } else {
+            ESP_LOGW("hx711_probe", "CH%02d read=%s (check wiring and power)",
+                     WEB_CLIENT_HX711_PROBE_CHANNEL, esp_err_to_name(err));
+        }
+        vTaskDelay(pdMS_TO_TICKS(600));
+    }
+}
+#endif
 
 static int64_t uptime_ms(void) { return esp_timer_get_time() / 1000; }
 static bool number_in(cJSON *value, double min, double max) {
@@ -498,10 +544,15 @@ static void command_task(void *arg) {
 
 /////////////////////////////////////////////////////////////////////////////
 // 函数名：app_main
-// 作用：启动独立网络固件，缺配置则停在提示；NVS 错误不擦除用户数据。
+// 作用：启动网络固件；可选单路 HX711 原始串口探测，缺网络配置仍可采样。
 // 参数：无；用于 WEB_CLIENT=1 profile；示例：ESP-IDF 自动调用。
 /////////////////////////////////////////////////////////////////////////////
 void app_main(void) {
+#if WEB_CLIENT_HX711_PROBE_CHANNEL >= 0
+    if (xTaskCreate(hx711_probe_task, "hx711_probe", 3072, NULL, 3, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "HX711 raw probe task allocation failed");
+    }
+#endif
     const size_t ssid_length=strlen(WEB_CLIENT_WIFI_SSID), password_length=strlen(WEB_CLIENT_WIFI_PASSWORD), url_length=strlen(WEB_CLIENT_SERVER_URL);
     if(!ssid_length||ssid_length>32||password_length>63||strlen(WEB_CLIENT_DEVICE_TOKEN)<24||url_length<10||url_length>200) {
         ESP_LOGE(TAG,"Configure main/web_client.local.h using scripts/configure_web_client.py before network use"); return;

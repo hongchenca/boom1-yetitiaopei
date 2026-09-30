@@ -4,5 +4,6 @@
   "wifi_password": "YOUR_WIFI_PASSWORD",
   "device_id": "esp32-001",
   "device_token": "COPY_DEVICE_TOKEN_FROM_DATA_CONNECTION_JSON",
-  "serial_test": true
+  "serial_test": true,
+  "hx711_probe_channel": -1
 }

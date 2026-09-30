@@ -20,7 +20,7 @@ class ConfigurationTests(unittest.TestCase):
         (self.root / 'main').mkdir()
         self.values = {'server_url': 'http://192.168.1.100:8000/console', 'wifi_ssid': 'Test "wifi"',
                        'wifi_password': 'test-password', 'device_id': 'esp32-001', 'device_token': 'a' * 48,
-                       'serial_test': True}
+                       'serial_test': True, 'hx711_probe_channel': -1}
         self.addCleanup(self.directory.cleanup)
 
     def generate(self):
@@ -37,6 +37,8 @@ class ConfigurationTests(unittest.TestCase):
         for key, value in self.values.items():
             if key == 'serial_test':
                 self.assertIn('#define WEB_CLIENT_SERIAL_TEST 1', header)
+            elif key == 'hx711_probe_channel':
+                self.assertIn('#define WEB_CLIENT_HX711_PROBE_CHANNEL -1', header)
             else:
                 self.assertIn('#define WEB_CLIENT_' + key.upper() + ' ' + json.dumps(value, ensure_ascii=False), header)
 
@@ -55,5 +57,12 @@ class ConfigurationTests(unittest.TestCase):
     def test_ssid_byte_limit(self):
         self.values['wifi_ssid'] = '测' * 11
         with self.assertRaises(SystemExit): self.generate()
+
+    def test_hx711_probe_channel_opt_in(self):
+        self.values['hx711_probe_channel'] = 8
+        self.assertIn('#define WEB_CLIENT_HX711_PROBE_CHANNEL 8', self.generate())
+        for invalid in [True, 9, -2, 1.0, '0']:
+            self.values['hx711_probe_channel'] = invalid
+            with self.assertRaises(SystemExit): self.generate()
 
 if __name__ == '__main__': unittest.main()

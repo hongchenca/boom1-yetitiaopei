@@ -41,6 +41,7 @@ idf_component_register(SRCS ${main_sources}
                        PRIV_REQUIRES ${main_dependencies}
                                      esp_wifi esp_event esp_netif nvs_flash
                                      esp_http_client json mbedtls lwip
+                       REQUIRES weight
                        INCLUDE_DIRS "")
 
 if(PCA004_BENCH)

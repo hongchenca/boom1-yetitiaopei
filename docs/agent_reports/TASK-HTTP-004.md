@@ -13,7 +13,7 @@
 - scripts/configure_web_client.py 从私密 JSON 生成 main/web_client.local.h，避免凭据进入命令行/CMake 日志。当前未生成真实配置头。
 - 新增可选串口测试输入：编译配置 `serial_test: true` 时从默认 UART0 逐行接收 JSON，更新 RAM 中 9 个测试通道/上传周期；遥测增加 `capabilities.test_input=true`，服务端仅对同样标记的设备放行有效测试样本。该路径不初始化 HX711/PCA9685/泵，不代表硬件数据。
 - 服务端测试身份可在对应 connection.json 设备条目设置 `serial_test: true`，或启动时设置 `APP_SERIAL_TEST=1`；两边都必须启用，否则服务端拒绝测试模式遥测，避免误把串口样本当作实机称重。
-- 无 GPIO/I2C 初始化，不调用泵、HX711 或 PCA9685；NVS 出错不自动擦除。没有刷写、串口、复位或实机控制操作。
+- 默认配置仍无 GPIO/I2C 初始化，不调用泵、HX711 或 PCA9685；仅当私有配置显式将 `hx711_probe_channel` 设为 `0..8` 时，启动一个只读单路 HX711 原始计数探测任务。NVS 出错不自动擦除。没有刷写、串口、复位或实机控制操作。
 
 ## 验证与阻塞
 

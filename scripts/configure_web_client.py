@@ -16,6 +16,9 @@ def main():
         parser.error('Each config field must be a string')
     if 'serial_test' in values and not isinstance(values['serial_test'], bool):
         parser.error('serial_test must be boolean')
+    probe_channel = values.get('hx711_probe_channel', -1)
+    if type(probe_channel) is not int or not -1 <= probe_channel <= 8:
+        parser.error('hx711_probe_channel must be an integer from -1 to 8')
     if any(any(ord(char) < 32 or ord(char) == 127 for char in values[key]) for key in keys):
         parser.error('Configuration fields must not contain NUL or control characters')
     url = urlsplit(values['server_url'])
@@ -30,6 +33,7 @@ def main():
         lines.append(f'#define WEB_CLIENT_{key.upper()} {json.dumps(values[key], ensure_ascii=False)}')
     serial_test = 1 if values.get('serial_test', False) else 0
     lines.append(f'#define WEB_CLIENT_SERIAL_TEST {serial_test}')
+    lines.append(f'#define WEB_CLIENT_HX711_PROBE_CHANNEL {probe_channel}')
     target = Path(__file__).resolve().parents[1] / 'main' / 'web_client.local.h'
     target.write_text('\n'.join(lines) + '\n', encoding='utf-8')
     print('Generated local firmware configuration (credentials omitted)')

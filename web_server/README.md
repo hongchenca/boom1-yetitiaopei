@@ -1,6 +1,6 @@
 # Yetitiaopei 网页与 ESP32 联调网关
 
-更新：2026-09-30；版本 0.2.0。当前只做网页、模拟设备和 ESP32 网络，不操作泵、PCA9685 或 HX711。
+更新：2026-10-01；版本 0.3.0。当前做网页、模拟设备和 ESP32 网络；HX711 仅提供默认关闭的单路原始计数探测，不操作泵或 PCA9685。
 
 ## 1. 本机启动
 
@@ -59,7 +59,11 @@ CLEAR
 
 单位是 mg；通道范围 0～8，周期 200～10000 ms。串口输入只保存在 RAM，下一次遥测上传到网页；`STATUS` 查看是否启用，`CLEAR` 恢复九路 null。串口与日志共用 UART0，因此发送时不要把日志内容作为 JSON；设备配置、编译成功和实机刷写仍需用户自行验证。
 
-入口 `main/web_client.c`；配置 `main/web_client.local.h`。不再使用 CMake 凭据参数。没有私有头文件也可构建，但固件仅提示缺少配置，不连接网络。WEB_CLIENT 与 PCA004_BENCH 互斥；默认内存探针入口保持不变。
+入口 `main/web_client.c`；配置 `main/web_client.local.h`。不再使用 CMake 凭据参数。没有私有头文件也可构建，但固件仅提示缺少配置，不连接网络。WEB_CLIENT 默认开启，与 PCA004_BENCH 互斥。
+
+### HX711 单路原始读数（可选）
+
+默认的 `hx711_probe_channel: -1` 完全不初始化 HX711 GPIO，原有串口测试上传保持不变。只在**接线、电平已核实**时，在 `web_server/data/device.local.json` 将它设为 `0`～`8` 中的一路，重新运行上述 `configure_web_client.py`，然后直接 `idf.py build`。日志每约 600 ms 输出 `CHxx raw=... counts (uncalibrated)`，未就绪会显示 `ESP_ERR_TIMEOUT`。引脚映射与约束见 `components/weight/README.md` 和 `docs/HARDWARE_ARCHITECTURE.md`。原始 ADC 计数不是克数；未完成去皮与砝码校准前，网页不会展示为有效重量。刷写与接线仍由用户确认后进行。
 
 Wi-Fi、遥测和命令长轮询分别处理，断线退避；命令仅校验后修改网络 RAM 配置。NVS 初始化失败不会擦除分区。固件和备份包含凭据时必须按私密文件保管；正式交付应为客户重新配置设备身份。
 
