@@ -1,0 +1,38 @@
+"""从本机配置生成 C 字符串，避免把 Wi-Fi 密码放进命令行或 CMake 日志。"""
+import argparse
+import json
+import re
+from pathlib import Path
+from urllib.parse import urlsplit
+
+def main():
+    """main：读取用户指定 JSON；只生成当前工程的网络配置头，不刷写设备。"""
+    parser = argparse.ArgumentParser()
+    parser.add_argument('config', type=Path)
+    args = parser.parse_args()
+    values = json.loads(args.config.read_text(encoding='utf-8-sig'))
+    keys = ('server_url', 'wifi_ssid', 'wifi_password', 'device_id', 'device_token')
+    if any(not isinstance(values.get(key), str) for key in keys):
+        parser.error('Each config field must be a string')
+    if 'serial_test' in values and not isinstance(values['serial_test'], bool):
+        parser.error('serial_test must be boolean')
+    if any(any(ord(char) < 32 or ord(char) == 127 for char in values[key]) for key in keys):
+        parser.error('Configuration fields must not contain NUL or control characters')
+    url = urlsplit(values['server_url'])
+    if url.scheme not in ('http', 'https') or not url.hostname or url.username or url.password or url.query or url.fragment or values['server_url'].endswith('/') or len(values['server_url']) > 200:
+        parser.error('server_url requires http(s), host and optional base path, without trailing slash or credentials')
+    if not 1 <= len(values['wifi_ssid'].encode()) <= 32 or len(values['wifi_password'].encode()) > 63:
+        parser.error('Wi-Fi SSID/password exceeds device byte limits')
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,48}', values['device_id']) or not re.fullmatch(r'[A-Za-z0-9_-]{24,128}', values['device_token']):
+        parser.error('Invalid device identity or token')
+    lines = ['/* Local development credentials. Do not commit or distribute. */', '#pragma once']
+    for key in keys:
+        lines.append(f'#define WEB_CLIENT_{key.upper()} {json.dumps(values[key], ensure_ascii=False)}')
+    serial_test = 1 if values.get('serial_test', False) else 0
+    lines.append(f'#define WEB_CLIENT_SERIAL_TEST {serial_test}')
+    target = Path(__file__).resolve().parents[1] / 'main' / 'web_client.local.h'
+    target.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    print('Generated local firmware configuration (credentials omitted)')
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,19 @@
+# ESP-IDF generated output
+build/
+build-*/
+sdkconfig.old
+
+# Python generated files
+__pycache__/
+*.py[cod]
+
+# Local credentials and runtime data
+web_server/data/
+web_server/config.local.json
+web_server/artifacts/
+web_server/node_modules/
+main/web_client.local.h
+
+# IDE and local tooling state
+.idea/
+.vscode/*.log

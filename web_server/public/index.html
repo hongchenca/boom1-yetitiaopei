@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>液体定量调配控制台</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div id="login" class="login-shell">
+    <div class="login-card">
+      <div class="brand-mark">Y</div>
+      <p class="eyebrow">YETITIAOPEI · LAN CONSOLE</p>
+      <h1>液体定量调配控制台</h1>
+      <p class="muted">本机 / 局域网联调版本</p>
+      <p class="login-help">首次登录：请在本机 <code>web_server/data/connection.json</code> 查看用户名和密码。</p>
+      <form id="login-form">
+        <label>用户名<input id="username" value="admin" autocomplete="username" required></label>
+        <label>密码<input id="password" type="password" autocomplete="current-password" required></label>
+        <button class="primary" type="submit">进入控制台</button>
+        <p id="login-error" class="error"></p>
+      </form>
+    </div>
+  </div>
+  <div id="app" class="app-shell hidden">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark small">Y</span><span><b>液体定量调配</b><small>LOCAL INDUSTRIAL CONSOLE</small></span></div>
+      <div class="top-actions"><span id="server-state" class="connection-dot offline">后台连接中</span><button id="logout" class="ghost">退出</button></div>
+    </header>
+    <div class="layout">
+      <aside class="sidebar">
+        <div class="section-caption">工作台</div>
+        <button class="nav active" data-tab="overview">总览 <span>⌂</span></button>
+        <button class="nav" data-tab="debug">实时调试 <span>⌁</span></button>
+        <button class="nav" data-tab="recipes">配方与配液 <span>▤</span></button>
+        <button class="nav" data-tab="records">记录与告警 <span>◷</span></button>
+        <div class="section-caption settings-caption">系统</div>
+        <button class="nav" data-tab="settings">连接设置 <span>⚙</span></button>
+        <div class="sidebar-foot"><span class="pulse"></span> 实时通信联调<br><small>泵与称重硬件尚未接入</small></div>
+      </aside>
+      <main class="main">
+        <section id="overview" class="tab active">
+          <div class="page-heading"><div><p class="eyebrow">OVERVIEW / 设备总览</p><h2>运行总览</h2><p class="muted">查看设备状态、称重样本和当前执行回执</p></div><div class="page-actions"><select id="device-select"></select><button id="refresh" class="secondary">刷新</button><button id="stop-top" class="danger">停止输出</button></div></div>
+          <div id="notice" class="notice info">正在读取设备状态…</div>
+          <p id="overview-result" class="muted result-line" role="status" aria-live="polite"></p>
+          <div class="summary-grid"><div class="summary-card"><span>连接设备</span><strong id="summary-online">—</strong><small>在线 / 已注册</small></div><div class="summary-card"><span>设备模式</span><strong id="summary-mode">—</strong><small id="summary-firmware">—</small></div><div class="summary-card"><span>当前任务</span><strong id="summary-task">—</strong><small id="summary-updated">—</small></div><div class="summary-card"><span>硬件能力</span><strong id="summary-capability">—</strong><small>当前仅网络与模拟器</small></div></div>
+          <div class="panel"><div class="panel-title"><div><h3>八路原液称重</h3><p>实机尚未接入称重时显示无数据；模拟样本用于界面调试</p></div><span id="sample-age" class="tag">—</span></div><div id="channel-grid" class="channel-grid"></div><div class="center-scale"><div><span>中央调配容器 · CH 08</span><strong id="center-mass">—</strong></div><span id="center-quality" class="tag">等待样本</span></div></div>
+          <div class="bottom-grid"><div class="panel"><div class="panel-title"><div><h3>实时样本曲线</h3><p>原始值 / 滤波值 · 单位 g · 最多 180 点</p></div><select id="chart-channel" aria-label="曲线通道"></select></div><canvas id="chart" width="800" height="220" aria-label="称重趋势"></canvas><div class="chart-legend"><span class="raw">原始值</span><span class="filtered">滤波值</span></div></div><div class="panel actuator-panel"><div class="panel-title"><div><h3>执行器回执</h3><p>页面请求不等于设备已执行</p></div></div><div id="actuator-state" class="actuator-state">等待设备回报</div><button id="stop-panel" class="danger full">停止模拟输出</button></div></div>
+        </section>
+        <section id="debug" class="tab"><div class="page-heading"><div><p class="eyebrow">DEBUG / 实时调试</p><h2>联调参数</h2><p class="muted">ESP32 可先验证上报周期与通信回执；输出点动仅限模拟设备</p></div></div><div class="debug-grid"><div class="panel"><div class="panel-title"><div><h3>设备上报周期</h3><p id="reported-interval">等待设备上报</p></div><span class="tag blue">会话内生效</span></div><div class="form-row"><label>周期 <input id="interval-input" type="number" min="200" max="10000" step="100"> ms</label><button id="apply-interval" class="primary">应用周期</button></div><p class="muted">200～10000 ms；只在设备内存中应用，重启恢复 1000 ms。</p><button id="ping" class="secondary">验证命令回执</button><p id="interval-result" class="muted result-line" role="status"></p></div><div class="panel"><div class="panel-title"><div><h3>模拟输出点动</h3><p>每次最多 5 秒，由模拟设备自行归零</p></div><span class="tag orange">模拟设备</span></div><label>通道 <select id="debug-channel"></select></label><label class="range-label">输出 <output id="debug-value">0%</output><input id="debug-slider" type="range" min="0" max="100" value="0"></label><div class="button-row"><button id="apply-debug" class="primary">模拟运行 5 秒</button><button id="stop-debug" class="secondary">停止</button></div><p id="debug-result" class="muted result-line" role="status"></p></div></div><div class="panel capability-panel"><h3>设备能力声明</h3><div id="capabilities"></div></div></section>
+        <section id="recipes" class="tab"><div class="page-heading"><div><p class="eyebrow">RECIPES / 自动配液</p><h2>配方与配液</h2><p class="muted">自动任务的参数在保存后对下一批次生效，当前尚未接入泵执行器</p></div></div><div class="empty-state"><div>▤</div><h3>配方编辑器待接入</h3><p>页面框架和设备通信已就绪。泵、称重和自动配液状态机将在硬件调试阶段接入。</p></div></section>
+        <section id="records" class="tab"><div class="page-heading"><div><p class="eyebrow">RECORDS / EVENTS</p><h2>记录与告警</h2><p class="muted">设备事件和命令回执保留在本机专用数据库</p></div></div><div class="panel"><div class="panel-title"><h3>最近事件</h3><button id="reload-events" class="secondary">刷新记录</button></div><div id="events" class="events"></div></div></section>
+        <section id="settings" class="tab"><div class="page-heading"><div><p class="eyebrow">SETTINGS / CONNECTION</p><h2>连接设置</h2><p class="muted">当前服务运行在开发电脑，可使用电脑局域网 IP 访问</p></div></div><div class="panel settings-list"><div><span>访问地址</span><strong id="access-url">—</strong></div><div><span>数据库</span><strong>本机专用 SQLite · WAL</strong></div><div><span>服务边界</span><strong>设备主动上报 / 25 秒命令长轮询</strong></div><div><span>安全状态</span><strong>登录已启用 · 实机密钥校验 · HTTPS 交付前配置</strong></div></div></section>
+      </main>
+    </div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

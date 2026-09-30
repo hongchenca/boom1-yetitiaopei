@@ -1,0 +1,10 @@
+{
+    "C_Cpp.intelliSenseEngine": "default",
+    "idf.espIdfPathWin": "e:\\Espressif\\frameworks\\esp-idf-v5.4.2",
+    "idf.openOcdConfigs": [
+        "board/esp32s3-builtin.cfg"
+    ],
+    "idf.toolsPathWin": "e:\\Espressif\\tools",
+    "idf.portWin": "COM5",
+    "idf.flashType": "UART"
+}
