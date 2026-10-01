@@ -2,6 +2,7 @@
 const $ = selector => document.querySelector(selector);
 const apiRoot = new URL('./api/v1/', location.href);
 const state = { devices: [], selected: null, device: null, history: [], stream: null, connected: false, busy: false, selectionVersion: 0 };
+window.yetiState = state;
 const text = (selector, value) => { $(selector).textContent = value; };
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
 const time = value => value ? new Date(value).toLocaleTimeString('zh-CN', { hour12: false }) : '—';
@@ -19,6 +20,7 @@ async function api(path, body) {
   if (!response.ok) { if (response.status === 401 && path !== 'auth/login') showLogin(); throw new Error(data.error || `HTTP ${response.status}`); }
   return data;
 }
+window.yetiApi = api;
 function showLogin() { state.stream?.close(); state.stream = null; state.connected = false; $('#app').classList.add('hidden'); $('#login').classList.remove('hidden'); }
 
 /** enter：登录后读取快照并订阅状态；无参数，用于登录/页面恢复，示例 await enter()。 */

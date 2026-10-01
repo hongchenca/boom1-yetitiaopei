@@ -4,5 +4,5 @@
   "private": true,
   "description": "局域网调配控制台与 ESP32 遥测网关",
   "engines": { "node": ">=24.14.0 <25" },
-  "scripts": { "start": "node server.js", "test": "node --test --test-isolation=none tests/api.test.js", "test:browser": "node tests/browser.test.js", "backup": "node backup.js" }
+  "scripts": { "start": "node server.js", "test": "node --test --test-isolation=none tests/api.test.js tests/business.test.js", "test:browser": "node tests/browser.test.js", "backup": "node backup.js" }
 }

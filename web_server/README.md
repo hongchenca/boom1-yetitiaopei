@@ -28,7 +28,7 @@ cd E:\111111111\yeti\yetitiaopei
 - SSE 每秒广播最新快照；200 ms 上报不等于浏览器 5 Hz 刷新。历史最多保存每设备每秒一条，接口返回最近 180 条；曲线不是精密采样/计量工具。
 - 模拟点动有独立 5 秒归零计时器；可停止，只作用于 `sim-001`。这不是硬件调试租约、急停或真实执行器安全验收。
 - 实机未连接时显示离线；连接后九路质量仍为 null/“—”，绝不补成 0。仅支持 ping 和上报周期，真实开泵/停止入口禁用。
-- 配方编辑、标定、自动配液、用户角色、多用户审计和生产设备控制暂未实现。
+- 配方版本编辑、模拟批次、两点标定记录、用户角色、审计和 JSON 导出已在网页联调版实现；模拟批次只改变软件状态，不驱动真实泵。真实泵/PCA9685/HX711 闭环控制仍保持关闭，必须另行完成硬件验收。
 
 ## 3. 配置 ESP32 上传
 
@@ -101,7 +101,7 @@ node web_server/backup.js web_server/data/backup-2026-09-30.db
 ## 6. 复验
 
 ```powershell
-node --test --test-isolation=none web_server/tests/api.test.js
+node --test --test-isolation=none web_server/tests/api.test.js web_server/tests/business.test.js
 node web_server/tests/browser.test.js
 python web_server/tests/configure.test.py
 node web_server/tests/running.test.js

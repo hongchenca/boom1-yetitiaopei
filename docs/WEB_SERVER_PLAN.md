@@ -8,9 +8,9 @@
 - WEB_CLIENT 网络入口位于 main/web_client.c，与 PCA004_BENCH 互斥；默认入口保持不变。只上传网络状态，九路质量为 null，仅执行 ping 和 RAM 上报周期，真实硬件能力关闭。
 - 设备上报 200～10000 ms，默认 1000 ms；SSE 每秒推送完整快照，历史最多每设备每秒一条。200 ms 上报不代表页面 5 Hz，更不等同于 HX711 采样率。
 - 模拟器走相同 HTTP 协议，与实机通过 device_id 隔离、存于同一专用 SQLite 文件。模拟输出独立五秒归零，不代表真实租约/失联安全已验收。
-- 已实现登录、总览、九通道曲线、网络调参/回执、模拟点动、记录、设置和配方占位。配方编辑、标定、自动配液、多角色、生产审计未实现；后文对应条目是未来目标。
+- 已实现登录、总览、九通道曲线、网络调参/回执、模拟点动、记录、设置、配方版本编辑、两点标定记录、模拟自动配液、多角色、生产审计和 JSON 导出。真实泵/PCA9685/HX711 闭环控制仍关闭；后文硬件执行与计量验收条目仍属于后续阶段。
 - 协议真源为 web_server/protocol.js 和 tests/api.test.js，尚无完整 OpenAPI。命令状态实现 queued/delivered/completed/rejected/expired/unknown；重启前待确认命令转 unknown，不自动重放。
-- 7 项 API 测试和 Edge 桌面/手机交互通过。固件完整编译、真实 ESP/LAN 与客户部署未验证；详见 agent_reports/TASK-SERVER-004.md 和 TASK-HTTP-004.md。
+- 9 项 API/业务测试和 Edge 桌面/手机交互通过。固件完整编译、真实 ESP/LAN 与客户部署未验证；详见 agent_reports/TASK-SERVER-004.md 和 TASK-HTTP-004.md。
 - 启动/凭据/备份见 ../web_server/README.md；客户自行部署与 nginx 片段见 ../web_server/deploy/。实际运行时为 Node 24.14.x，不是 Python 虚拟环境；Node SQLite 实验性提示需在生产封包前评估并固定运行时。
 
 下文保留原始完整设计以追踪后续目标；不同的框架/目录/功能不应当作当前代码事实。

@@ -31,7 +31,10 @@ async function main() {
     if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
     return result.result.value;
   };
-  const waitFor = expression => until(() => evaluate(expression), Boolean);
+  const waitFor = async (expression, label = expression) => {
+    try { return await until(() => evaluate(expression), Boolean); }
+    catch (error) { throw new Error('Browser check failed: ' + label, { cause: error }); }
+  };
   const screenshot = async name => {
     const { data } = await command('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true });
     fs.writeFileSync(path.join(artifacts, name + '.png'), Buffer.from(data, 'base64'));
@@ -82,6 +85,54 @@ async function main() {
     await screenshot('04-real-device-unconnected');
     await evaluate('document.querySelector("#device-select").value="sim-001";document.querySelector("#device-select").dispatchEvent(new Event("change"))');
     await waitFor('state.device?.simulation && state.device?.online');
+
+    // 所有业务写入均通过真实表单或按钮触发；数据库只读核对最终状态，不替代页面操作。
+    await evaluate('document.querySelector("[data-tab=recipes]").click()');
+    await waitFor('Boolean(document.querySelector("#batch-device option[value=sim-001]"))', 'batch device options loaded');
+    await evaluate('document.querySelector("#recipe-new").click()');
+    await waitFor('document.querySelectorAll("#recipe-steps .step-row").length===1', 'new recipe editor ready');
+    await evaluate('document.querySelector("#recipe-name").value="Browser recipe";document.querySelector("#recipe-notes").value="DOM regression";document.querySelector(".step-target").value="1000";document.querySelector(".step-tolerance").value="20";document.querySelector(".step-settle").value="2000";document.querySelector("#recipe-form").requestSubmit()');
+    await waitFor('document.querySelector("#recipe-result").textContent.includes("已保存 v1") && document.querySelector("#recipe-id").dataset.version==="1"', 'recipe created as v1');
+    const recipeId = await evaluate('document.querySelector("#recipe-id").value');
+    await waitFor('document.querySelector("#recipe-list").textContent.includes("Browser recipe") && document.querySelector("#batch-recipe").options.length===1', 'saved recipe and batch options loaded');
+    await evaluate('document.querySelector("#recipe-name").value="Browser recipe v2";document.querySelector(".step-target").value="2000";document.querySelector("#recipe-form").requestSubmit()');
+    await waitFor('document.querySelector("#recipe-result").textContent.includes("已保存 v2") && document.querySelector("#recipe-id").dataset.version==="2"', 'recipe edited as v2');
+    await waitFor('document.querySelector("#batch-recipe").selectedOptions[0]?.textContent.includes("Browser recipe v2")', 'updated recipe option ready');
+    assert.equal(gateway.business.recipe(recipeId).version, 2);
+    assert.equal(gateway.business.recipeVersions(recipeId).length, 2);
+    assert.equal(gateway.business.recipe(recipeId).steps[0].target_mg, 2000);
+    await screenshot('07-recipes-desktop');
+    await evaluate('document.querySelector("#batch-device").value="sim-001"');
+    await waitFor('state.device?.id==="sim-001" && state.device?.online && state.device.status.channels.every(c=>c.valid && c.stable) && !state.busy', 'simulated device idle and stable before batch');
+    await evaluate('document.querySelector("#batch-start").click()');
+    await waitFor('/running|settling/.test(document.querySelector("#batch-tag").textContent)', 'batch started through button');
+    await waitFor('document.querySelector("#batch-tag").textContent.includes("completed") && document.querySelector("#batch-tag").textContent.includes("100%")', 'batch completed in page');
+    assert.match(await evaluate('document.querySelector("#batch-status").textContent'), /实际 2\.00 g.*误差 0\.00 g/);
+    const completedJob = gateway.business.jobs()[0];
+    assert.equal(completedJob.state, 'completed'); assert.equal(completedJob.mode, 'simulation');
+    assert.equal(completedJob.recipe.version, 2); assert.equal(completedJob.results[0].actual_mg, 2000);
+    await screenshot('08-batch-completed-desktop');
+    await waitFor('state.device.status.task_state==="idle" && state.device.status.channels.every(c=>c.stable)', 'simulator reported completion before next batch');
+    await evaluate('document.querySelector("#batch-start").click()');
+    await waitFor('/running|settling/.test(document.querySelector("#batch-tag").textContent)', 'second batch started');
+    await evaluate('document.querySelector("#batch-stop").click()');
+    await waitFor('document.querySelector("#batch-tag").textContent.includes("cancelled")', 'batch stopped through button');
+    const stoppedJob = gateway.business.jobs()[0];
+    assert.notEqual(stoppedJob.id, completedJob.id); assert.equal(stoppedJob.state, 'cancelled');
+    assert.equal(stoppedJob.reason, 'user_cancelled');
+
+    await evaluate('document.querySelector("[data-tab=records]").click()');
+    await waitFor('document.querySelector("#cal-channel").dataset.version==="0"', 'calibration initial version loaded');
+    await evaluate('document.querySelector("#cal-zero").value="100";document.querySelector("#cal-loaded").value="1100";document.querySelector("#cal-mass").value="10000";document.querySelector("#cal-source").value="simulation";document.querySelector("#calibration-form").requestSubmit()');
+    await waitFor('document.querySelector("#cal-result").textContent.includes("版本 v1") && document.querySelector("#cal-channel").dataset.version==="1"', 'first calibration saved as v1');
+    await evaluate('document.querySelector("#cal-loaded").value="2100";document.querySelector("#calibration-form").requestSubmit()');
+    await waitFor('document.querySelector("#cal-result").textContent.includes("版本 v2") && document.querySelector("#cal-channel").dataset.version==="2"', 'same-channel calibration saved again as v2');
+    const calibrations = gateway.business.calibrations('sim-001');
+    assert.equal(calibrations.length, 2); assert.equal(calibrations[0].version, 2);
+    assert.equal(calibrations[0].channel, 0); assert.equal(calibrations[0].mg_per_count, 5); assert.equal(calibrations[0].applied, false);
+    await waitFor('document.querySelector("#audit-list").textContent.includes("calibration_recorded")', 'calibration audit visible');
+    await screenshot('09-calibration-audit-desktop');
+    await evaluate('document.querySelector("[data-tab=overview]").click()');
     await command('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
     await sleep(500); assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true);
     await screenshot('05-overview-mobile');
@@ -89,12 +140,30 @@ async function main() {
     assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true); await screenshot('06-debug-mobile');
     await evaluate('document.querySelector("[data-tab=records]").click()');
     await waitFor('document.querySelector("#events").textContent.includes("set_upload_interval")');
+    assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true, 'records/calibration/audit page overflows mobile viewport');
+    await screenshot('10-records-mobile');
+    await evaluate('document.querySelector("[data-tab=recipes]").click()');
+    await waitFor('document.querySelector("#recipe-list").textContent.includes("Browser recipe v2")', 'mobile recipe list loaded');
+    assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true, 'recipes/batches page overflows mobile viewport');
+    await screenshot('11-recipes-mobile');
+    await evaluate('document.querySelector("[data-tab=settings]").click()');
+    await waitFor('document.querySelector("#diagnostics").textContent.includes("hardware_control")', 'diagnostics loaded');
+    assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true, 'settings/diagnostics page overflows mobile viewport');
+    await screenshot('12-settings-mobile');
     await evaluate('document.querySelector("#logout").click()');
     await waitFor('!document.querySelector("#login").classList.contains("hidden")');
     assert.deepEqual(exceptions, []);
     fs.writeFileSync(path.join(artifacts, 'result.json'), JSON.stringify({ passed: true, at: new Date().toISOString(), basePath: '/console', desktop: [1440, 1100], mobile: [390, 844], runtimeExceptions: exceptions, node: process.version }, null, 2));
-    console.log('PASS browser: login, SSE, interval, draft, ping, simulated output timeout, stop feedback, real hardware lockout, records, mobile, logout');
+    console.log('PASS browser: login, SSE, interval, draft, ping, simulated output timeout, stop feedback, real hardware lockout, recipe v1/v2, batch complete/cancel, calibration v1/v2, audit, diagnostics, all mobile pages, logout');
     console.log('Screenshots: ' + artifacts);
+  } catch (error) {
+    let pageState;
+    if (socket?.readyState === WebSocket.OPEN) {
+      pageState = await evaluate('({activeTab:document.querySelector(".tab.active")?.id,recipe:document.querySelector("#recipe-result")?.textContent,batch:document.querySelector("#batch-status")?.textContent,batchTag:document.querySelector("#batch-tag")?.textContent,calibration:document.querySelector("#cal-result")?.textContent,width:innerWidth,scrollWidth:document.documentElement.scrollWidth})').catch(() => null);
+      await screenshot('failure').catch(() => {});
+    }
+    fs.writeFileSync(path.join(artifacts, 'result.json'), JSON.stringify({ passed: false, at: new Date().toISOString(), error: error.message, pageState, runtimeExceptions: exceptions, node: process.version }, null, 2));
+    throw error;
   } finally {
     socket?.close(); if (browser && browser.exitCode === null) { browser.kill(); await Promise.race([once(browser, 'exit'), sleep(3000)]); }
     gateway.close();

@@ -4,6 +4,8 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { loadConfig } = require('./config');
 const { Store } = require('./store');
+const { ConsoleStore } = require('./console-store');
+const { consoleRoute, requireRole } = require('./console-api');
 const { ApiError, requireValue, plain, integer, identifier, validateTelemetry, validateCommand } = require('./protocol');
 
 /**
@@ -12,6 +14,7 @@ const { ApiError, requireValue, plain, integer, identifier, validateTelemetry, v
  */
 function createServer(config) {
   const store = new Store(config.dataDir, config.devices);
+  const business = new ConsoleStore(store, config);
   const sessions = new Map(), streams = new Set(), waiters = new Map(), leases = new Map(), attempts = new Map();
   const base = config.basePath, publicDir = path.join(__dirname, 'public');
   let simulator, timer, closing = false;
@@ -26,7 +29,9 @@ function createServer(config) {
   const requireSession = req => {
     const token = cookie(req), s = sessions.get(token);
     if (!s || s.expires_at <= Date.now()) throw new ApiError(401, 'login_required');
-    return { ...s, token };
+    const current = business.user(s.username);
+    if (!current?.enabled || current.revision !== s.revision) { sessions.delete(token); throw new ApiError(401,'login_required'); }
+    return { ...s, ...current, token };
   };
   const requireDevice = req => {
     const d = config.devices.find(d => d.id === req.headers['x-device-id']);
@@ -73,13 +78,13 @@ function createServer(config) {
     const pathname = url.pathname.slice(base.length);
     if (!pathname.startsWith('/api/v1/')) {
       if (req.method !== 'GET') throw new ApiError(405, 'method_not_allowed');
-      const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/app.css': ['app.css', 'text/css'] };
+      const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/console.js': ['console.js', 'text/javascript'], '/app.css': ['app.css', 'text/css'] };
       const file = files[pathname]; if (!file) throw new ApiError(404, 'not_found');
       res.writeHead(200, { 'Content-Type': file[1] + '; charset=utf-8', 'Cache-Control': 'no-cache' });
       return res.end(fs.readFileSync(path.join(publicDir, file[0])));
     }
     const p = pathname.slice('/api/v1'.length);
-    if (p === '/healthz' && req.method === 'GET') return send(res, 200, { ok: true, version: '0.2.0', schema_version: 1 });
+    if (p === '/healthz' && req.method === 'GET') return send(res, 200, { ok: true, version: '0.3.0', schema_version: 1 });
     const deviceRoute = p.startsWith('/device/');
     if (!deviceRoute && req.headers.origin) {
       const origin = new URL(req.headers.origin);
@@ -95,13 +100,16 @@ function createServer(config) {
       const rate = previous && previous.until > Date.now() ? previous : { count: 0, until: Date.now() + 60000 };
       if (rate.count >= 10 || sessions.size >= 64) throw new ApiError(429, 'login_rate_limit');
       rate.count++; attempts.set(key, rate);
-      if (body.username !== config.username || !equalSecret(body.password, config.password)) throw new ApiError(401, 'invalid_credentials');
+      const account = business.authenticate(body.username, body.password);
+      if (!account) throw new ApiError(401, 'invalid_credentials');
       attempts.delete(key);
       const token = crypto.randomBytes(32).toString('base64url');
-      sessions.set(token, { username: config.username, expires_at: Date.now() + 8 * 3600000 });
-      return send(res, 200, { username: config.username }, { 'Set-Cookie': `yt_session=${token}; Path=${base || '/'}; HttpOnly; SameSite=Strict${config.secureCookie ? '; Secure' : ''}` });
+      sessions.set(token, { ...account, expires_at: Date.now() + 8 * 3600000 });
+      business.audit(account.username,'login','session');
+      return send(res, 200, account, { 'Set-Cookie': `yt_session=${token}; Path=${base || '/'}; HttpOnly; SameSite=Strict${config.secureCookie ? '; Secure' : ''}` });
     }
     if (p === '/auth/logout' && req.method === 'POST') {
+      business.audit(user.username,'logout','session');
       sessions.delete(user.token);
       return send(res, 200, { ok: true }, { 'Set-Cookie': `yt_session=; Path=${base || '/'}; Max-Age=0; HttpOnly; SameSite=Strict` });
     }
@@ -123,12 +131,13 @@ function createServer(config) {
       }
       throw new ApiError(404, 'route_not_found');
     }
+    if (consoleRoute({p,req,res,url,body,user,send,business,store})) return;
     if (p === '/devices' && req.method === 'GET') return send(res, 200, { devices: store.devices() });
     if (p === '/stream' && req.method === 'GET') {
       if (streams.size >= 32) throw new ApiError(429, 'stream_limit');
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no' });
       const stream = { res, token: user.token }; streams.add(stream);
-      res.write(`event: snapshot\ndata: ${JSON.stringify({ devices: store.devices() })}\n\n`);
+      res.write(`event: snapshot\ndata: ${JSON.stringify({ devices: store.devices(), jobs: business.jobs() })}\n\n`);
       res.once('close', () => streams.delete(stream)); return;
     }
     const device = /^\/devices\/([a-zA-Z0-9_-]+)(?:\/(status|history|events|commands|debug-sessions|stop))?$/.exec(p);
@@ -140,6 +149,8 @@ function createServer(config) {
         if (!suffix || suffix === 'status') return send(res, 200, d);
       }
       if (req.method === 'POST' && suffix === 'debug-sessions') {
+        requireRole(user,'operate');
+        if (business.activeJob(d.id)) throw new ApiError(409,'device_busy');
         if (!d.simulation || !d.online) throw new ApiError(409, 'simulation_only');
         const existing = leases.get(d.id);
         if (existing && existing.until > Date.now() && existing.owner !== user.token) throw new ApiError(409, 'device_busy');
@@ -147,6 +158,7 @@ function createServer(config) {
         leases.set(d.id, lease); return send(res, 200, { session_id: lease.id, lease_ms: 6000 });
       }
       if (req.method === 'POST' && (suffix === 'commands' || suffix === 'stop')) {
+        requireRole(user,'operate');
         requireValue(body.schema_version === 1 && identifier(body.request_id), 'unsupported_schema');
         const old = store.byRequest(d.id, body.request_id);
         if (old) {
@@ -154,11 +166,13 @@ function createServer(config) {
           return send(res, 200, { command: commandView(old), duplicate: true });
         }
         validateCommand(body, d);
+        if (body.type === 'debug_apply' && business.activeJob(d.id)) throw new ApiError(409,'device_busy');
+        if (body.type === 'stop' && business.activeJob(d.id)) business.stopJob(business.activeJob(d.id).id,user.username);
         if (body.type === 'debug_apply') {
           const lease = leases.get(d.id);
           if (!lease || lease.until < Date.now() || lease.owner !== user.token || lease.id !== body.payload.session_id) throw new ApiError(409, 'debug_session_expired');
         }
-        const c = store.enqueue(d, body); notify(d.id); return send(res, 202, { command: commandView(c) });
+        const c = store.enqueue(d, body); business.audit(user.username,'command_queued',d.id,{id:c.id,type:c.type}); notify(d.id); return send(res, 202, { command: commandView(c) });
       }
     }
     const status = /^\/commands\/([a-zA-Z0-9_-]+)$/.exec(p);
@@ -174,7 +188,7 @@ function createServer(config) {
   server.requestTimeout = 15000; server.headersTimeout = 10000;
   server.on('error', error => console.error('listen_failed', error.code));
   return {
-    server, store,
+    server, store, business,
     listen() {
       server.listen(config.port, config.host, () => {
         const port = server.address().port;
@@ -182,16 +196,18 @@ function createServer(config) {
         const origin = 'http://' + host + ':' + port + base;
         console.log('Yetitiaopei: ' + origin + '/');
         console.log(`Local credentials: ${config.credentialFile}`);
-        if (config.simulate) simulator = require('./simulator').startSimulator(origin, config.simDevice);
+        if (config.simulate) simulator = require('./simulator').startSimulator(origin, config.simDevice, () => business.simulatedSnapshot(config.simDevice.id));
       });
       let ticks = 0;
       timer = setInterval(() => {
+        business.tick();
         for (const [key, s] of sessions) if (s.expires_at <= Date.now()) sessions.delete(key);
         for (const [key, rate] of attempts) if (rate.until <= Date.now()) attempts.delete(key);
         for (const [key, lease] of leases) if (!sessions.has(lease.owner) || lease.until <= Date.now()) leases.delete(key);
         for (const stream of streams) {
-          if (!sessions.has(stream.token) || stream.res.writableLength > 65536) { stream.res.end(); streams.delete(stream); continue; }
-          stream.res.write(`event: snapshot\ndata: ${JSON.stringify({ devices: store.devices() })}\n\n`);
+          const session=sessions.get(stream.token), account=session && business.user(session.username);
+          if (!account?.enabled || account.revision!==session.revision || stream.res.writableLength > 65536) { stream.res.end(); streams.delete(stream); continue; }
+          stream.res.write(`event: snapshot\ndata: ${JSON.stringify({ devices: store.devices(), jobs: business.jobs() })}\n\n`);
         }
         if (++ticks % 30 === 0) store.prune();
       }, 1000);

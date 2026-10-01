@@ -6,7 +6,7 @@ const { setTimeout: sleep } = require('node:timers/promises');
  * 参数 origin：后台根 URL（含子路径）；identity：只用于模拟器的凭据。
  * 用于本机页面联调；示例 startSimulator(origin, config.simDevice)。返回 stop()。
  */
-function startSimulator(origin, identity) {
+function startSimulator(origin, identity, batchSnapshot = () => null) {
   const abort = new AbortController(), started = Date.now(), boot = crypto.randomUUID();
   let interval = 1000, version = 1, sequence = 0, duty = 0, channel = 0, outputDeadline = 0, stopTimer;
   const ackCache = new Map();
@@ -24,15 +24,16 @@ function startSimulator(origin, identity) {
     while (!abort.signal.aborted) {
       try {
         if (Date.now() >= outputDeadline) duty = 0;
+        const batch = batchSnapshot();
         const channels = Array.from({ length: 9 }, (_, i) => {
           const offset = i === 8 ? 20000 : 400000 + i * 7500;
-          const filtered = Math.round(offset + Math.sin(uptime()/4000+i)*500);
-          return { channel: i, mass_mg: filtered + Math.round(Math.sin(uptime()/300)*70), filtered_mg: filtered, valid: true, stable: duty === 0, age_ms: 0 };
+          const filtered = batch ? batch.masses[i] : Math.round(offset + Math.sin(uptime()/4000+i)*500);
+          return { channel: i, mass_mg: filtered + (batch ? 0 : Math.round(Math.sin(uptime()/300)*70)), filtered_mg: filtered, valid: true, stable: duty === 0 && !batch?.active, age_ms: 0 };
         });
         await post('/telemetry', { ...envelope(), sequence: sequence++, uptime_ms: uptime(), firmware: 'simulator-0.2.0', sample_age_ms: 0,
           capabilities: { telemetry: true, events: true, command_poll: true, simulation: true, test_input: false, weight: true, actuator: true },
           status: { upload_interval_ms: interval, config_version: version, free_heap_bytes: 190000, wifi_rssi: -42, channels,
-            actuator: { channel, requested_percent: duty, applied_percent: duty, output: 'simulated' }, task_state: duty ? 'debug' : 'idle' } });
+            actuator: { channel:batch?.active ? batch.channel:channel, requested_percent:batch?.active ? batch.duty:duty, applied_percent:batch?.active ? batch.duty:duty, output: 'simulated' }, task_state:batch?.active ? batch.state : duty ? 'debug' : 'idle' } });
         if (!announced) { await post('/events', { ...envelope(), event_id: `boot-${boot}`, type: 'boot', payload: { firmware: 'simulator-0.2.0' } }); announced = true; }
       } catch { if (!abort.signal.aborted) await delay(1000); }
       await delay(interval);
