@@ -12,12 +12,14 @@ const { ApiError, requireValue, plain, integer, identifier, validateTelemetry, v
  * createServer：构建单实例局域网网关，不启动硬件。
  * 参数 config：经校验的运行配置；用于 CLI 和集成测试；示例 createServer(loadConfig()).listen()。
  */
-function createServer(config) {
-  const store = new Store(config.dataDir, config.devices);
-  const business = new ConsoleStore(store, config);
+function createServer(config, { deferStorage = false } = {}) {
+  config = {...config, devices:config.devices.filter(d => !d.simulation && d.id !== 'sim-001')};
+  let store, business;
+  const openStorage=()=>{store=new Store(config.dataDir,config.devices);business=new ConsoleStore(store,config);};
+  if(!deferStorage)openStorage();
   const sessions = new Map(), streams = new Set(), waiters = new Map(), leases = new Map(), attempts = new Map();
   const base = config.basePath, publicDir = path.join(__dirname, 'public');
-  let simulator, timer, closing = false;
+  let timer, closing = false;
   const secretHash = text => crypto.createHash('sha256').update(String(text || '')).digest();
   const equalSecret = (a, b) => crypto.timingSafeEqual(secretHash(a), secretHash(b));
   const send = (res, status, data, headers = {}) => {
@@ -42,6 +44,21 @@ function createServer(config) {
   const notify = id => waiters.get(id)?.wake();
   const assertDevice = id => { const d = store.device(id); if (!d) throw new ApiError(404, 'device_not_found'); return d; };
 
+  /** broadcastSnapshot：遥测到达即推送，1 秒心跳只刷新在线/年龄；慢连接断开后由页面重连。 */
+  function broadcastSnapshot() {
+    const frame = `event: snapshot\ndata: ${JSON.stringify({devices:store.devices(),sent_at:Date.now()})}\n\n`;
+    for (const stream of streams) {
+      const session=sessions.get(stream.token), account=session && business.user(session.username);
+      if (!account?.enabled || session.expires_at <= Date.now() || account.revision!==session.revision) {
+        stream.res.end('event: session-expired\ndata: {}\n\n'); streams.delete(stream); continue;
+      }
+      if (stream.res.writableLength > 65536) {
+        stream.res.end(); streams.delete(stream); continue;
+      }
+      stream.res.write(frame);
+    }
+  }
+
   /** readBody：限制 JSON 为 32 KiB；req 为请求流，用于所有 POST。 */
   async function readBody(req) {
     if (!(req.headers['content-type'] || '').toLowerCase().startsWith('application/json')) throw new ApiError(415, 'json_required');
@@ -51,20 +68,39 @@ function createServer(config) {
     catch { throw new ApiError(400, 'invalid_json'); }
   }
 
+  /** nextCommand：投递前重查逐路令牌和操作者，跳过失效点动后继续投递其他通道。 */
+  function nextCommand(deviceId, bootId) {
+    for (;;) {
+      const command = store.next(deviceId, bootId);
+      if (!command || !['debug_apply','aux_apply'].includes(command.type)) return command;
+      const lease = leases.get(deviceId), session = lease && sessions.get(lease.owner);
+      const account = session && business.user(session.username);
+      const token = command.type==='debug_apply' && store.device(deviceId).status.actuator.parallel_supported === true ? lease?.channel_session_ids[command.payload.channel] : lease?.id;
+      let authorized = Boolean(lease && token === command.payload.session_id && lease.until > Date.now() &&
+        session && session.expires_at > Date.now() && account?.enabled && account.revision === session.revision);
+      if (authorized) {
+        try { requireRole(account, 'operate'); } catch { authorized = false; }
+      }
+      if (authorized) return command;
+      command.state = 'expired'; command.reason = 'debug_session_expired';
+      store.saveCommand(command);
+    }
+  }
+
   /** poll：一个设备最多一个有界等待；res 断开即清理，遥测不经过此等待。 */
   async function poll(identity, body, res) {
     requireValue(body.schema_version === 1 && body.device_id === identity.id && identifier(body.boot_id));
     requireValue(integer(body.wait_ms, 0, 25000));
     if (store.device(identity.id).boot_id !== body.boot_id) throw new ApiError(409, 'boot_mismatch');
     if (waiters.has(identity.id)) throw new ApiError(409, 'poll_in_progress');
-    const initial = store.next(identity.id, body.boot_id);
+    const initial = nextCommand(identity.id, body.boot_id);
     if (initial || body.wait_ms === 0) return send(res, 200, { command: initial });
     await new Promise(resolve => {
       const cleanup = () => { clearTimeout(timeout); waiters.delete(identity.id); res.removeListener('close', cleanup); resolve(); };
       const timeout = setTimeout(cleanup, body.wait_ms);
       waiters.set(identity.id, { wake: cleanup }); res.once('close', cleanup);
     });
-    if (!closing && !res.destroyed) send(res, 200, { command: store.next(identity.id, body.boot_id) });
+    if (!closing && !res.destroyed) send(res, 200, { command: nextCommand(identity.id, body.boot_id) });
   }
 
   /** route：HTTP 鉴权和协议边界；req/res 为 Node 请求响应对象。 */
@@ -78,13 +114,14 @@ function createServer(config) {
     const pathname = url.pathname.slice(base.length);
     if (!pathname.startsWith('/api/v1/')) {
       if (req.method !== 'GET') throw new ApiError(405, 'method_not_allowed');
-      const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/console.js': ['console.js', 'text/javascript'], '/app.css': ['app.css', 'text/css'] };
+      const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/console.js': ['console.js', 'text/javascript'], '/weight-filter.js': ['weight-filter.js', 'text/javascript'], '/app.css': ['app.css', 'text/css'] };
+      files['/dosing-config.js']=['dosing-config.js','text/javascript']; files['/outlet.js']=['outlet.js','text/javascript'];
       const file = files[pathname]; if (!file) throw new ApiError(404, 'not_found');
       res.writeHead(200, { 'Content-Type': file[1] + '; charset=utf-8', 'Cache-Control': 'no-cache' });
       return res.end(fs.readFileSync(path.join(publicDir, file[0])));
     }
     const p = pathname.slice('/api/v1'.length);
-    if (p === '/healthz' && req.method === 'GET') return send(res, 200, { ok: true, version: '0.3.0', schema_version: 1 });
+    if (p === '/healthz' && req.method === 'GET') return send(res, 200, { ok: true, version: '0.5.1', schema_version: 1 });
     const deviceRoute = p.startsWith('/device/');
     if (!deviceRoute && req.headers.origin) {
       const origin = new URL(req.headers.origin);
@@ -115,7 +152,12 @@ function createServer(config) {
     }
     if (deviceRoute) {
       if (req.method !== 'POST') throw new ApiError(405, 'method_not_allowed');
-      if (p === '/device/telemetry') return send(res, 200, store.ingest(validateTelemetry(body, identity)));
+      if (p === '/device/telemetry') {
+        const result = store.ingest(validateTelemetry(body, identity));
+        send(res, 200, result);
+        if (!result.duplicate) broadcastSnapshot();
+        return;
+      }
       if (p === '/device/events') {
         requireValue(body.schema_version === 1 && body.device_id === identity.id && identifier(body.event_id) && identifier(body.boot_id));
         requireValue(typeof body.type === 'string' && /^[a-z0-9_]{1,40}$/.test(body.type) && plain(body.payload));
@@ -135,9 +177,11 @@ function createServer(config) {
     if (p === '/devices' && req.method === 'GET') return send(res, 200, { devices: store.devices() });
     if (p === '/stream' && req.method === 'GET') {
       if (streams.size >= 32) throw new ApiError(429, 'stream_limit');
-      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no' });
+      req.socket.setKeepAlive(true,15000); res.setTimeout(0);
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no' });
+      res.flushHeaders();
       const stream = { res, token: user.token }; streams.add(stream);
-      res.write(`event: snapshot\ndata: ${JSON.stringify({ devices: store.devices(), jobs: business.jobs() })}\n\n`);
+      res.write(`retry: 1000\nevent: snapshot\ndata: ${JSON.stringify({ devices: store.devices(), sent_at:Date.now() })}\n\n`);
       res.once('close', () => streams.delete(stream)); return;
     }
     const device = /^\/devices\/([a-zA-Z0-9_-]+)(?:\/(status|history|events|commands|debug-sessions|stop))?$/.exec(p);
@@ -151,11 +195,16 @@ function createServer(config) {
       if (req.method === 'POST' && suffix === 'debug-sessions') {
         requireRole(user,'operate');
         if (business.activeJob(d.id)) throw new ApiError(409,'device_busy');
-        if (!d.simulation || !d.online) throw new ApiError(409, 'simulation_only');
+        if (d.status?.dosing?.active) throw new ApiError(409,'dosing_busy');
+        if (!d.online) throw new ApiError(409, 'device_offline');
+        if (!d.actuator_enabled || !d.capabilities.actuator) throw new ApiError(409, 'hardware_not_supported');
         const existing = leases.get(d.id);
         if (existing && existing.until > Date.now() && existing.owner !== user.token) throw new ApiError(409, 'device_busy');
-        const lease = { id: existing?.owner === user.token ? existing.id : crypto.randomUUID(), owner: user.token, until: Date.now() + 6000 };
-        leases.set(d.id, lease); return send(res, 200, { session_id: lease.id, lease_ms: 6000 });
+        const lease = existing?.owner === user.token && existing.until > Date.now() ? existing :
+          { id: crypto.randomUUID(), owner: user.token, channel_session_ids: Array.from({length:8},()=>crypto.randomUUID()) };
+        lease.until = Date.now() + 6000;
+        leases.set(d.id, lease); return send(res, 200, { session_id: lease.id, lease_ms: 6000,
+          ...(d.status.actuator.parallel_supported === true ? {channel_session_ids:lease.channel_session_ids} : {}) });
       }
       if (req.method === 'POST' && (suffix === 'commands' || suffix === 'stop')) {
         requireRole(user,'operate');
@@ -166,13 +215,23 @@ function createServer(config) {
           return send(res, 200, { command: commandView(old), duplicate: true });
         }
         validateCommand(body, d);
-        if (body.type === 'debug_apply' && business.activeJob(d.id)) throw new ApiError(409,'device_busy');
-        if (body.type === 'stop' && business.activeJob(d.id)) business.stopJob(business.activeJob(d.id).id,user.username);
-        if (body.type === 'debug_apply') {
+        if (['debug_apply','aux_apply','dosing_start'].includes(body.type) && business.activeJob(d.id)) throw new ApiError(409,'device_busy');
+        if (body.type === 'stop' && body.payload.channel === undefined && business.activeJob(d.id)) business.stopJob(business.activeJob(d.id).id,user.username);
+        if (['debug_apply','aux_apply'].includes(body.type)) {
           const lease = leases.get(d.id);
-          if (!lease || lease.until < Date.now() || lease.owner !== user.token || lease.id !== body.payload.session_id) throw new ApiError(409, 'debug_session_expired');
+          const token = body.type==='debug_apply' && d.status.actuator.parallel_supported === true ? lease?.channel_session_ids[body.payload.channel] : lease?.id;
+          if (!lease || lease.until < Date.now() || lease.owner !== user.token || token !== body.payload.session_id) throw new ApiError(409, 'debug_session_expired');
         }
-        const c = store.enqueue(d, body); business.audit(user.username,'command_queued',d.id,{id:c.id,type:c.type}); notify(d.id); return send(res, 202, { command: commandView(c) });
+        // 单路停止只轮换本路令牌，挡住迟到的启动请求；全部停止撤销整台设备租约。
+        if (body.type === 'stop') {
+          if (body.payload.channel === undefined) leases.delete(d.id);
+          else {
+            const lease = leases.get(d.id);
+            if (lease) lease.channel_session_ids[body.payload.channel] = crypto.randomUUID();
+          }
+        }
+        const debugUntil = ['debug_apply','aux_apply'].includes(body.type) ? leases.get(d.id).until : null;
+        const c = store.enqueue(d, body, debugUntil); business.audit(user.username,'command_queued',d.id,{id:c.id,type:c.type}); notify(d.id); return send(res, 202, { command: commandView(c) });
       }
     }
     const status = /^\/commands\/([a-zA-Z0-9_-]+)$/.exec(p);
@@ -186,44 +245,40 @@ function createServer(config) {
     });
   });
   server.requestTimeout = 15000; server.headersTimeout = 10000;
-  server.on('error', error => console.error('listen_failed', error.code));
+  server.on('error', error => console.error(error.code==='EADDRINUSE' ? `端口 ${config.port} 已有服务运行。请打开 http://127.0.0.1:${config.port}${base}/，或先退出原服务。` : `listen_failed ${error.code}`));
   return {
-    server, store, business,
+    server, get store(){return store;}, get business(){return business;},
     listen() {
       server.listen(config.port, config.host, () => {
+        // CLI 先确认端口归属再打开数据库，重复启动不会把现有待执行命令标为重启失效。
+        try { if(!store)openStorage(); } catch(error) { server.emit('error',error);return; }
         const port = server.address().port;
         const host = config.host === '0.0.0.0' ? '127.0.0.1' : config.host === '::' ? '[::1]' : config.host.includes(':') ? '[' + config.host + ']' : config.host;
         const origin = 'http://' + host + ':' + port + base;
         console.log('Yetitiaopei: ' + origin + '/');
         console.log(`Local credentials: ${config.credentialFile}`);
-        if (config.simulate) simulator = require('./simulator').startSimulator(origin, config.simDevice, () => business.simulatedSnapshot(config.simDevice.id));
-      });
-      let ticks = 0;
-      timer = setInterval(() => {
-        business.tick();
+        let ticks = 0;
+        timer = setInterval(() => {
         for (const [key, s] of sessions) if (s.expires_at <= Date.now()) sessions.delete(key);
         for (const [key, rate] of attempts) if (rate.until <= Date.now()) attempts.delete(key);
         for (const [key, lease] of leases) if (!sessions.has(lease.owner) || lease.until <= Date.now()) leases.delete(key);
-        for (const stream of streams) {
-          const session=sessions.get(stream.token), account=session && business.user(session.username);
-          if (!account?.enabled || account.revision!==session.revision || stream.res.writableLength > 65536) { stream.res.end(); streams.delete(stream); continue; }
-          stream.res.write(`event: snapshot\ndata: ${JSON.stringify({ devices: store.devices(), jobs: business.jobs() })}\n\n`);
-        }
+        broadcastSnapshot();
         if (++ticks % 30 === 0) store.prune();
-      }, 1000);
+        }, 1000);
+      });
     },
     close() {
       if (closing) return;
       closing = true;
-      clearInterval(timer); simulator?.stop();
+      clearInterval(timer);
       for (const waiter of waiters.values()) waiter.wake();
       for (const { res } of streams) res.end();
-      server.close(); server.closeAllConnections(); store.close();
+      server.close(); server.closeAllConnections(); store?.close();
     }
   };
 }
 if (require.main === module) {
-  const gateway = createServer(loadConfig());
+  const gateway = createServer(loadConfig(), {deferStorage:true});
   gateway.server.once('error', () => { gateway.close(); process.exitCode = 1; });
   gateway.listen();
   process.once('SIGINT', () => gateway.close()); process.once('SIGTERM', () => gateway.close());

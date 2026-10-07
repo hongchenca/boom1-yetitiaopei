@@ -12,7 +12,7 @@ static portMUX_TYPE s_clock_lock = portMUX_INITIALIZER_UNLOCKED;
 
 /////////////////////////////////////////////////////////////////////////////
 // 函数名：hx711_init
-// 作用：初始化一组独立的 DOUT 输入和 SCK 输出，先锁定 SCK 为低电平。
+// 作用：初始化上拉 DOUT 输入与低电平 SCK；未接模块时 DOUT 应保持未就绪。
 // 参数1：device，驱动实例；参数2：dout_gpio，模块输出；参数3：sck_gpio，模块时钟输入。
 // 用于：台架开始前配置已核实接线的一路 HX711。
 // 使用示例：hx711_init(&scale, GPIO_NUM_1, GPIO_NUM_2);
@@ -25,7 +25,7 @@ esp_err_t hx711_init(hx711_t *device, gpio_num_t dout_gpio, gpio_num_t sck_gpio)
     }
     gpio_config_t input = {
         .pin_bit_mask = 1ULL << dout_gpio, .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE, .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .pull_up_en = GPIO_PULLUP_ENABLE, .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
     gpio_config_t output = {
@@ -34,6 +34,8 @@ esp_err_t hx711_init(hx711_t *device, gpio_num_t dout_gpio, gpio_num_t sck_gpio)
         .intr_type = GPIO_INTR_DISABLE,
     };
     esp_err_t err = gpio_config(&input);
+    if (err != ESP_OK) return err;
+    err = gpio_set_level(sck_gpio, 0);
     if (err != ESP_OK) return err;
     err = gpio_config(&output);
     if (err != ESP_OK) return err;
@@ -47,7 +49,7 @@ esp_err_t hx711_init(hx711_t *device, gpio_num_t dout_gpio, gpio_num_t sck_gpio)
 
 /////////////////////////////////////////////////////////////////////////////
 // 函数名：hx711_read
-// 作用：有界等待转换完成，并在连续 25 个时钟周期中读出 24 位有符号原始值。
+// 作用：有界等待、读取有符号 24 位值，并检查第 25 个脉冲后 DOUT 恢复高电平。
 // 参数1：device，已初始化实例；参数2：ready_timeout_ms，等待上限，0 表示只检查一次。
 // 参数3：raw_count，仅在成功时写入；范围为 -8388608～8388607。
 // 用于：采样任务读取原始 ADC 计数；未校准数据不可作为克数上传。
@@ -80,7 +82,10 @@ esp_err_t hx711_read(hx711_t *device, uint32_t ready_timeout_ms, int32_t *raw_co
     gpio_set_level(device->sck_gpio, 1);
     esp_rom_delay_us(1);
     gpio_set_level(device->sck_gpio, 0);
+    esp_rom_delay_us(1);
+    bool released = gpio_get_level(device->dout_gpio) != 0;
     portEXIT_CRITICAL(&s_clock_lock);
+    if (!released) return ESP_ERR_INVALID_RESPONSE; // DOUT 短路到地不能被当作有效零值。
     *raw_count = (int32_t)bits - ((bits & 0x800000u) ? 0x1000000 : 0);
     return ESP_OK;
 }

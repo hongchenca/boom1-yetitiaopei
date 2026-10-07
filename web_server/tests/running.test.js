@@ -20,7 +20,8 @@ async function main() {
   const response = await request('/api/v1/devices', { headers: { Cookie: cookie } }); assert.equal(response.status, 200);
   const { devices } = await response.json();
   const addresses = Object.entries(os.networkInterfaces()).flatMap(([name, list]) => list.filter(n => n.family === 'IPv4' && !n.internal).map(n => ({ name, address: n.address })));
-  const files = ['server.js','config.js','store.js','protocol.js','simulator.js','public/index.html','public/app.css','public/app.js','tests/api.test.js','tests/browser.test.js','../main/web_client.c','../scripts/configure_web_client.py'];
+  assert.ok(devices.every(d => !d.simulation && d.id !== 'sim-001'));
+  const files = ['server.js','config.js','store.js','protocol.js','public/index.html','public/app.css','public/app.js','tests/api.test.js','tests/browser.test.js','../main/web_client.c','../scripts/configure_web_client.py'];
   const sources = Object.fromEntries(files.map(file => [file, crypto.createHash('sha256').update(fs.readFileSync(path.join(app, file))).digest('hex')]));
   const report = { at: new Date().toISOString(), node: process.version, origin, health, devices: devices.map(d => ({ id: d.id, simulation: d.simulation, online: d.online, sequence: d.sequence })), addresses, sources };
   const output = path.join(app, 'artifacts', 'local-smoke.json'); fs.mkdirSync(path.dirname(output), { recursive: true });

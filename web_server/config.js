@@ -27,8 +27,10 @@ function loadConfig() {
     if (!/^[a-zA-Z0-9_-]{1,48}$/.test(d.id) || d.id === 'sim-001' || typeof d.name !== 'string' ||
         typeof d.token !== 'string' || !/^[A-Za-z0-9_-]{24,128}$/.test(d.token) ||
         (d.serial_test !== undefined && typeof d.serial_test !== 'boolean') ||
+        (d.actuator !== undefined && typeof d.actuator !== 'boolean') ||
+        (d.weight !== undefined && typeof d.weight !== 'boolean') ||
         identities.has(d.id) || tokens.has(d.token)) {
-      throw new Error('设备 ID/密钥必须有效、唯一，sim-001 为模拟器保留');
+      throw new Error('设备 ID/密钥必须有效、唯一，不能使用已停用的 sim-001');
     }
     identities.add(d.id); tokens.add(d.token);
   }
@@ -36,13 +38,10 @@ function loadConfig() {
   if (basePath && !/^\/[a-zA-Z0-9_/-]+$/.test(basePath)) throw new Error('APP_BASE_PATH 必须为 /console 形式');
   const port = Number(process.env.APP_PORT || 8000);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('APP_PORT 无效');
-  const simulate = process.env.APP_SIMULATOR !== '0';
-  const simDevice = { id: 'sim-001', name: '演示设备 · 模拟数据', token: crypto.randomBytes(24).toString('hex'), simulation: true };
   return {
     host: process.env.APP_HOST || '0.0.0.0', port, dataDir, basePath, credentialFile: file,
     username: local.username, password: local.password, secureCookie: process.env.APP_SECURE_COOKIE === '1',
-    devices: [...local.devices.map(d => ({ ...d, simulation: false, serial_test: process.env.APP_SERIAL_TEST === '1' || d.serial_test === true })), ...(simulate ? [simDevice] : [])],
-    simulate, simDevice
+    devices: local.devices.map(d => ({ ...d, simulation: false, serial_test: false }))
   };
 }
 module.exports = { loadConfig };

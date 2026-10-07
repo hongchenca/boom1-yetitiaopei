@@ -12,6 +12,7 @@ web_server/data/
 web_server/config.local.json
 web_server/artifacts/
 web_server/node_modules/
+dist/
 main/web_client.local.h
 
 # IDE and local tooling state

@@ -2,3 +2,6 @@ data/
 node_modules/
 artifacts/
 config.local.json
+deploy/settings.json
+deploy/.env
+vendor/

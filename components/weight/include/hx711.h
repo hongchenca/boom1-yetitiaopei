@@ -18,6 +18,7 @@ esp_err_t hx711_init(hx711_t *device, gpio_num_t dout_gpio, gpio_num_t sck_gpio)
 
 // 在至多 ready_timeout_ms 毫秒内等待 DOUT 变低，再读取一个有符号
 // 24 位原始计数；超时返回 ESP_ERR_TIMEOUT，不修改 raw_count。
+// 25 个时钟后 DOUT 未恢复高电平则返回 ESP_ERR_INVALID_RESPONSE。
 // 同一设备只能由一个任务读取；不同设备内部时钟事务互斥。
 esp_err_t hx711_read(hx711_t *device, uint32_t ready_timeout_ms, int32_t *raw_count);
 

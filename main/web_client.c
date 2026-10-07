@@ -1,4 +1,4 @@
-/* 网络联调入口：仅在私有配置显式启用时探测单路 HX711 原始计数；永不驱动泵/PCA9685。 */
+/* 网络入口：命令校验后交给八路执行器服务，称重采样与执行器仍分开管理。 */
 #include <inttypes.h>
 #include <math.h>
 #include <stdbool.h>
@@ -7,7 +7,8 @@
 #include <string.h>
 #include <time.h>
 #include "cJSON.h"
-#include "driver/uart.h"
+#include "actuator.h"
+#include "dosing_service.h"
 #include "esp_crt_bundle.h"
 #include "esp_event.h"
 #include "esp_http_client.h"
@@ -21,8 +22,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
-#include "hx711.h"
 #include "hx711_board.h"
+#include "weight_service.h"
 #include "nvs_flash.h"
 
 #if __has_include("web_client.local.h")
@@ -37,12 +38,29 @@
 #define WEB_CLIENT_HX711_PROBE_CHANNEL -1
 #endif
 
+#ifndef WEB_CLIENT_PUMP_CONTROL
+#define WEB_CLIENT_PUMP_CONTROL 0
+#endif
+#ifndef WEB_CLIENT_HX711_SCALE1
+#define WEB_CLIENT_HX711_SCALE1 0
+#endif
+#ifndef WEB_CLIENT_OUTLET_CONTROL
+#define WEB_CLIENT_OUTLET_CONTROL 0
+#endif
+#define WEB_CLIENT_FIRMWARE "web-client-0.6.1"
+// ESP-IDF 的功率单位为 0.25 dBm；80 对应 20 dBm 上限，实际发送受 PHY/国家配置限制。
+#define WEB_CLIENT_WIFI_TX_POWER_QDBM 80
+
 #ifndef WEB_CLIENT_HX711_PROBE_CHANNEL
 #define WEB_CLIENT_HX711_PROBE_CHANNEL -1
 #endif
 
 #if WEB_CLIENT_HX711_PROBE_CHANNEL < -1 || WEB_CLIENT_HX711_PROBE_CHANNEL >= HX711_BOARD_SCALE_COUNT
 #error WEB_CLIENT_HX711_PROBE_CHANNEL must be -1 or 0..8
+#endif
+
+#if WEB_CLIENT_SERIAL_TEST || WEB_CLIENT_HX711_PROBE_CHANNEL >= 0
+#error Legacy serial input and raw probe were removed; set serial_test=false and hx711_probe_channel=-1
 #endif
 
 #define CONNECTED_BIT BIT0
@@ -52,59 +70,17 @@ static const char *TAG = "web_client";
 static EventGroupHandle_t s_events;
 static char s_boot[33];
 static portMUX_TYPE s_config_lock = portMUX_INITIALIZER_UNLOCKED;
-static uint32_t s_interval = 1000, s_version = 1;
+static uint32_t s_interval = 200, s_version = 1, s_http_ms;
+static TaskHandle_t s_telemetry_task;
 static bool s_https;
 
 typedef struct { char *data; size_t capacity, length; bool overflow; } response_t;
 typedef struct { char id[81]; char body[512]; } cached_ack_t;
 static cached_ack_t s_acks[8]; /* 仅 command_task 所有。缓存覆盖至少八个已处理命令。 */
 static unsigned s_ack_index;
-typedef struct {
-    int32_t mass_mg;
-    int32_t filtered_mg;
-    uint32_t age_ms;
-    bool valid;
-    bool stable;
-} serial_channel_t;
-static serial_channel_t s_serial_channels[9];
-static bool s_serial_test_enabled;
-static portMUX_TYPE s_sample_lock = portMUX_INITIALIZER_UNLOCKED;
-
-#if WEB_CLIENT_HX711_PROBE_CHANNEL >= 0
-/////////////////////////////////////////////////////////////////////////////
-// 函数名：hx711_probe_task
-// 作用：对一台已确认电平与接线的 HX711 周期性打印原始 ADC 计数。
-// 参数1：arg，未使用。
-// 用于：仅本机串口台架诊断；不会进入网络称重遥测或执行器控制。
-// 使用示例：由 app_main 在 WEB_CLIENT_HX711_PROBE_CHANNEL=0 时创建。
-/////////////////////////////////////////////////////////////////////////////
-static void hx711_probe_task(void *arg) {
-    (void)arg;
-    hx711_t scale = {0};
-    const hx711_pin_pair_t pins = hx711_board_pins[WEB_CLIENT_HX711_PROBE_CHANNEL];
-    esp_err_t err = hx711_init(&scale, pins.dout_gpio, pins.sck_gpio);
-    if (err != ESP_OK) {
-        ESP_LOGE("hx711_probe", "init failed: %s", esp_err_to_name(err));
-        vTaskDelete(NULL);
-        return;
-    }
-    ESP_LOGI("hx711_probe", "channel=%d DOUT=GPIO%d SCK=GPIO%d raw ADC counts only",
-             WEB_CLIENT_HX711_PROBE_CHANNEL, (int)pins.dout_gpio, (int)pins.sck_gpio);
-    for (;;) {
-        int32_t raw = 0;
-        err = hx711_read(&scale, 300, &raw);
-        if (err == ESP_OK) {
-            ESP_LOGI("hx711_probe", "CH%02d raw=%" PRId32 " counts (uncalibrated)",
-                     WEB_CLIENT_HX711_PROBE_CHANNEL, raw);
-        } else {
-            ESP_LOGW("hx711_probe", "CH%02d read=%s (check wiring and power)",
-                     WEB_CLIENT_HX711_PROBE_CHANNEL, esp_err_to_name(err));
-        }
-        vTaskDelay(pdMS_TO_TICKS(600));
-    }
-}
+#if WEB_CLIENT_PUMP_CONTROL
+static uint64_t s_control_sequence; // 同一 boot 内不允许重放已离开回执缓存的旧控制命令。
 #endif
-
 static int64_t uptime_ms(void) { return esp_timer_get_time() / 1000; }
 static bool number_in(cJSON *value, double min, double max) {
     return cJSON_IsNumber(value) && isfinite(value->valuedouble) && floor(value->valuedouble) == value->valuedouble && value->valuedouble >= min && value->valuedouble <= max;
@@ -117,186 +93,6 @@ static bool valid_id(cJSON *value) {
     for (size_t i = 0; i < n; i++) if (!((s[i]>='a'&&s[i]<='z')||(s[i]>='A'&&s[i]<='Z')||(s[i]>='0'&&s[i]<='9')||s[i]=='-'||s[i]=='_')) return false;
     return true;
 }
-
-/////////////////////////////////////////////////////////////////////////////
-// 函数名：json_integer
-// 作用：读取有限范围内的 JSON 整数，避免把浮点或溢出值用于测试遥测。
-// 参数1：value，待校验 JSON 值；参数2/3：允许的最小/最大值。
-// 参数4：result，可选输出整数。
-// 用于：串口测试输入边界校验。
-/////////////////////////////////////////////////////////////////////////////
-static bool json_integer(cJSON *value, int64_t minimum, int64_t maximum, int64_t *result) {
-    if (!cJSON_IsNumber(value) || !isfinite(value->valuedouble) ||
-        floor(value->valuedouble) != value->valuedouble ||
-        value->valuedouble < (double)minimum || value->valuedouble > (double)maximum) {
-        return false;
-    }
-    if (result) *result = (int64_t)value->valuedouble;
-    return true;
-}
-
-/////////////////////////////////////////////////////////////////////////////
-// 函数名：serial_channel_value
-// 作用：解析一条串口通道样本；valid=false 时将数值归零为本地占位，不上传为有效称重。
-// 参数1：item，JSON 对象；参数2：output，解析结果。
-// 用于：串口测试任务。
-/////////////////////////////////////////////////////////////////////////////
-static bool serial_channel_value(cJSON *item, serial_channel_t *output, int *index) {
-    int64_t channel, mass = 0, filtered = 0, age;
-    cJSON *valid = cJSON_GetObjectItemCaseSensitive(item, "valid");
-    cJSON *mass_value = cJSON_GetObjectItemCaseSensitive(item, "mass_mg");
-    cJSON *filtered_value = cJSON_GetObjectItemCaseSensitive(item, "filtered_mg");
-    if (!cJSON_IsObject(item) ||
-        !json_integer(cJSON_GetObjectItemCaseSensitive(item, "channel"), 0, 8, &channel) ||
-        !json_integer(cJSON_GetObjectItemCaseSensitive(item, "age_ms"), 0, 60000, &age) ||
-        !cJSON_IsBool(valid) ||
-        (cJSON_IsTrue(valid) &&
-         (!json_integer(mass_value, -1000000000, 1000000000, &mass) ||
-          !json_integer(filtered_value, -1000000000, 1000000000, &filtered))) ||
-        (mass_value && !cJSON_IsNull(mass_value) &&
-         !json_integer(mass_value, -1000000000, 1000000000, &mass)) ||
-        (filtered_value && !cJSON_IsNull(filtered_value) &&
-         !json_integer(filtered_value, -1000000000, 1000000000, &filtered))) {
-        return false;
-    }
-    output->mass_mg = (int32_t)mass;
-    output->filtered_mg = (int32_t)filtered;
-    output->age_ms = (uint32_t)age;
-    output->valid = cJSON_IsTrue(valid);
-    output->stable = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(item, "stable"));
-    if (!output->valid) output->mass_mg = output->filtered_mg = 0;
-    *index = (int)channel;
-    return true;
-}
-
-/////////////////////////////////////////////////////////////////////////////
-// 函数名：serial_apply
-// 作用：原子更新串口测试样本或上传周期；不接入 GPIO、HX711、泵和 PCA9685。
-// 参数1：root，串口 JSON 对象；返回值表示格式和范围是否有效。
-// 用于：serial_test_task。
-/////////////////////////////////////////////////////////////////////////////
-static bool serial_apply(cJSON *root) {
-    serial_channel_t pending[9];
-    int indices[9];
-    size_t count = 0;
-    int64_t interval_value = 0;
-    bool has_interval = false;
-    cJSON *interval = cJSON_GetObjectItemCaseSensitive(root, "interval_ms");
-    if (interval) {
-        if (!json_integer(interval, 200, 10000, &interval_value)) return false;
-        has_interval = true;
-    }
-    cJSON *channels = cJSON_GetObjectItemCaseSensitive(root, "channels");
-    if (cJSON_IsArray(channels)) {
-        cJSON *item = NULL;
-        cJSON_ArrayForEach(item, channels) {
-            if (count >= 9 || !serial_channel_value(item, &pending[count], &indices[count])) return false;
-            count++;
-        }
-    } else if (cJSON_HasObjectItem(root, "channel")) {
-        if (!serial_channel_value(root, &pending[0], &indices[0])) return false;
-        count = 1;
-    } else if (!interval) {
-        return false;
-    }
-    if (has_interval) {
-        portENTER_CRITICAL(&s_config_lock);
-        s_interval = (uint32_t)interval_value;
-        s_version++;
-        portEXIT_CRITICAL(&s_config_lock);
-    }
-    if (count > 0) {
-        portENTER_CRITICAL(&s_sample_lock);
-        for (size_t i = 0; i < count; i++) s_serial_channels[indices[i]] = pending[i];
-        s_serial_test_enabled = true;
-        portEXIT_CRITICAL(&s_sample_lock);
-    }
-    return true;
-}
-
-/////////////////////////////////////////////////////////////////////////////
-// 函数名：serial_line
-// 作用：处理一行串口测试命令；支持 JSON、STATUS 和 CLEAR，并返回可见结果。
-// 参数：line，已写入 NUL 的可修改行缓冲。
-// 用于：serial_test_task。
-/////////////////////////////////////////////////////////////////////////////
-static void serial_line(char *line) {
-    while (*line == ' ' || *line == '\t') line++;
-    size_t length = strlen(line);
-    while (length > 0 && (line[length - 1] == '\r' || line[length - 1] == '\n' ||
-                           line[length - 1] == ' ' || line[length - 1] == '\t')) line[--length] = 0;
-    if (strcmp(line, "CLEAR") == 0) {
-        portENTER_CRITICAL(&s_sample_lock);
-        memset(s_serial_channels, 0, sizeof(s_serial_channels));
-        s_serial_test_enabled = false;
-        portEXIT_CRITICAL(&s_sample_lock);
-        printf("SERIAL_OK clear\r\n");
-        return;
-    }
-    if (strcmp(line, "STATUS") == 0) {
-        bool enabled;
-        uint32_t interval, version;
-        portENTER_CRITICAL(&s_sample_lock); enabled = s_serial_test_enabled; portEXIT_CRITICAL(&s_sample_lock);
-        portENTER_CRITICAL(&s_config_lock); interval = s_interval; version = s_version; portEXIT_CRITICAL(&s_config_lock);
-        printf("SERIAL_STATUS enabled=%d interval_ms=%" PRIu32 " config_version=%" PRIu32 "\r\n",
-               enabled ? 1 : 0, interval, version);
-        return;
-    }
-    cJSON *root = cJSON_Parse(line);
-    if (!root || !cJSON_IsObject(root) || !serial_apply(root)) {
-        cJSON_Delete(root);
-        printf("SERIAL_ERROR use {\"channel\":0,\"mass_mg\":12345,\"filtered_mg\":12300,\"valid\":true,\"stable\":true,\"age_ms\":0}\r\n");
-        return;
-    }
-    cJSON_Delete(root);
-    printf("SERIAL_OK accepted\r\n");
-}
-
-#if CONFIG_ESP_CONSOLE_UART
-/////////////////////////////////////////////////////////////////////////////
-// 函数名：serial_test_task
-// 作用：从默认控制台 UART 逐行接收测试 JSON；与日志共用串口，仅用于联调。
-// 参数：arg，未使用。
-// 用于：WEB_CLIENT 测试 profile。
-/////////////////////////////////////////////////////////////////////////////
-static void serial_test_task(void *arg) {
-    (void)arg;
-    const uart_port_t port = (uart_port_t)CONFIG_ESP_CONSOLE_UART_NUM;
-    uint8_t byte;
-    char line[1024];
-    size_t length = 0;
-    bool discard_line = false;
-    if (!uart_is_driver_installed(port)) {
-        esp_err_t install = uart_driver_install(port, 2048, 0, 0, NULL, 0);
-        if (install != ESP_OK && install != ESP_ERR_INVALID_STATE) {
-            ESP_LOGE(TAG, "Serial test UART install failed: %s", esp_err_to_name(install));
-            vTaskDelete(NULL);
-            return;
-        }
-    }
-    printf("SERIAL_TEST_READY format={\"channel\":0,\"mass_mg\":12345,\"filtered_mg\":12300,\"valid\":true,\"stable\":true,\"age_ms\":0}; commands=STATUS,CLEAR\r\n");
-    for (;;) {
-        int received = uart_read_bytes(port, &byte, 1, pdMS_TO_TICKS(100));
-        if (received <= 0) continue;
-        if (byte == '\r' || byte == '\n') {
-            if (discard_line) { discard_line = false; length = 0; continue; }
-            if (length > 0) {
-                line[length] = 0;
-                serial_line(line);
-                length = 0;
-            }
-        } else if (discard_line) {
-            continue;
-        } else if (length + 1 < sizeof(line)) {
-            line[length++] = (char)byte;
-        } else {
-            length = 0;
-            discard_line = true;
-            printf("SERIAL_ERROR line_too_long\r\n");
-        }
-    }
-}
-#endif
 
 /////////////////////////////////////////////////////////////////////////////
 // 函数名：http_event
@@ -317,12 +113,13 @@ static esp_err_t http_event(esp_http_client_event_t *event) {
 /////////////////////////////////////////////////////////////////////////////
 // 函数名：post_json
 // 作用：发送设备鉴权 JSON，重定向被拒绝，HTTPS 使用 CA bundle 校验证书。
-// 参数1：path，/device 开头的 API 后缀；参数2：body，调用期间有效的 JSON。
-// 参数3：reply，调用方缓冲区；参数4：capacity，至少 1 字节。
-// 参数5：timeout_ms，HTTP 超时；参数6：status，可为 NULL，接收 HTTP 状态。
-// 用于：所有上行路径；示例：post_json(path, body, reply, sizeof(reply), 5000, NULL)。
+// 参数1：reuse，调用任务独占的 HTTP 句柄地址，句柄初值 NULL。
+// 参数2：path，API 相对路径；参数3：body，调用期间有效的 JSON 字符串。
+// 参数4：reply，调用方缓冲区；参数5：capacity，至少 1 字节。
+// 参数6：timeout_ms，HTTP 超时毫秒；参数7：status，可为 NULL，接收 HTTP 状态。
+// 用于：所有上行路径；示例：post_json(&client, path, body, reply, sizeof(reply), 5000, NULL)。
 /////////////////////////////////////////////////////////////////////////////
-static esp_err_t post_json(const char *path, const char *body, char *reply, size_t capacity, int timeout_ms, int *status) {
+static esp_err_t post_json(esp_http_client_handle_t *reuse, const char *path, const char *body, char *reply, size_t capacity, int timeout_ms, int *status) {
     char url[384];
     if (!reply || capacity == 0) return ESP_ERR_INVALID_ARG;
     reply[0] = 0; if (status) *status = 0;
@@ -335,8 +132,14 @@ static esp_err_t post_json(const char *path, const char *body, char *reply, size
         .event_handler=http_event, .user_data=&response, .disable_auto_redirect=true,
         .crt_bundle_attach=esp_crt_bundle_attach,
     };
-    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_http_client_handle_t client = *reuse;
+    if (!client) client = esp_http_client_init(&config);
     if (!client) return ESP_ERR_NO_MEM;
+    *reuse = client;
+    esp_http_client_set_user_data(client, &response);
+    esp_http_client_set_timeout_ms(client, timeout_ms);
+    esp_err_t url_error = esp_http_client_set_url(client, url);
+    if (url_error != ESP_OK) { esp_http_client_cleanup(client); *reuse = NULL; return url_error; }
     esp_err_t err = esp_http_client_set_header(client, "Content-Type", "application/json");
     if (err == ESP_OK) err = esp_http_client_set_header(client, "X-Device-Id", WEB_CLIENT_DEVICE_ID);
     if (err == ESP_OK) err = esp_http_client_set_header(client, "X-Device-Token", WEB_CLIENT_DEVICE_TOKEN);
@@ -344,27 +147,45 @@ static esp_err_t post_json(const char *path, const char *body, char *reply, size
     if (err == ESP_OK) err = esp_http_client_perform(client);
     int code = esp_http_client_get_status_code(client);
     if (status) *status = code;
-    esp_http_client_cleanup(client);
+    if (err != ESP_OK || response.overflow) { esp_http_client_cleanup(client); *reuse = NULL; }
     if (response.overflow) return ESP_ERR_INVALID_SIZE;
     return err != ESP_OK ? err : ((code >= 200 && code < 300) ? ESP_OK : ESP_FAIL);
 }
 
 /////////////////////////////////////////////////////////////////////////////
 // 函数名：wifi_event
-// 作用：发布连接位，事件线程不重连、不运行 HTTP。
+// 作用：发布连接位并记录连接参数/断线原因，事件线程不重连、不运行 HTTP。
 // 参数1：arg，未使用；参数2：base，事件组；参数3：event，事件 ID。
 // 参数4：data，事件数据，由 ESP-IDF 管理。
 // 用于：系统事件循环；示例：通过 esp_event_handler_register 注册。
 /////////////////////////////////////////////////////////////////////////////
 static void wifi_event(void *arg, esp_event_base_t base, int32_t event, void *data) {
-    (void)arg; (void)data;
+    (void)arg;
     if (base == WIFI_EVENT && event == WIFI_EVENT_STA_DISCONNECTED) {
         xEventGroupClearBits(s_events, CONNECTED_BIT | REGISTERED_BIT);
         xEventGroupSetBits(s_events, DISCONNECTED_BIT);
+        const wifi_event_sta_disconnected_t *disconnected = data;
+        if (disconnected) ESP_LOGW(TAG, "Wi-Fi disconnected: reason=%u, rssi=%d dBm",
+            (unsigned)disconnected->reason, (int)disconnected->rssi);
     } else if (base == IP_EVENT && event == IP_EVENT_STA_GOT_IP) {
         xEventGroupClearBits(s_events, DISCONNECTED_BIT);
         xEventGroupSetBits(s_events, CONNECTED_BIT);
         ESP_LOGI(TAG, "Wi-Fi connected; telemetry enabled");
+        wifi_ps_type_t ps;
+        wifi_bandwidth_t bandwidth;
+        int8_t tx_power;
+        wifi_ap_record_t ap;
+        if (esp_wifi_get_ps(&ps) == ESP_OK &&
+            esp_wifi_get_bandwidth(WIFI_IF_STA, &bandwidth) == ESP_OK &&
+            esp_wifi_get_max_tx_power(&tx_power) == ESP_OK &&
+            esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+            ESP_LOGI(TAG, "Wi-Fi link: ps=%s, bandwidth=%s, tx_limit=%.2f dBm, channel=%u, rssi=%d dBm",
+                ps == WIFI_PS_NONE ? "NONE" : "MODEM",
+                bandwidth == WIFI_BW_HT20 ? "HT20" : "HT40",
+                tx_power / 4.0, (unsigned)ap.primary, (int)ap.rssi);
+        } else {
+            ESP_LOGW(TAG, "Wi-Fi link parameters unavailable");
+        }
     }
 }
 
@@ -391,20 +212,27 @@ static void connection_task(void *arg) {
 
 /////////////////////////////////////////////////////////////////////////////
 // 函数名：telemetry_json
-// 作用：构造真实网络状态；九路质量为 null，无有效传感器读数。
+// 作用：构造九路称重快照与八路执行器状态；未校准或过期质量为 null。
 // 参数1：sequence，单调递增上报序号；参数2：buffer，输出 JSON。
-// 参数3：capacity，缓冲区大小；用于 telemetry_task；示例：telemetry_json(seq, data, 4096)。
+// 参数3：capacity，缓冲区大小；用于 telemetry_task；示例：telemetry_json(seq, payload, sizeof(payload))。
 /////////////////////////////////////////////////////////////////////////////
 static bool telemetry_json(uint64_t sequence, char *buffer, size_t capacity) {
+    weight_service_status_t weights[9] = {0};
+    bool weight_enabled = false;
+#if WEB_CLIENT_HX711_SCALE1
+    for (unsigned i=0;i<9;++i) { weight_service_get_status(i, &weights[i]); weight_enabled |= weights[i].initialized; }
+#endif
+    actuator_status_t pumps = {.active_channel = -1};
+#if WEB_CLIENT_PUMP_CONTROL
+    actuator_get_status(&pumps);
+#endif
+    dosing_service_status_t dose = {0};
+#if WEB_CLIENT_OUTLET_CONTROL && WEB_CLIENT_HX711_SCALE1
+    dosing_service_get_status(&dose);
+#endif
     uint32_t interval, version;
     portENTER_CRITICAL(&s_config_lock); interval=s_interval; version=s_version; portEXIT_CRITICAL(&s_config_lock);
     wifi_ap_record_t ap; int rssi = esp_wifi_sta_get_ap_info(&ap) == ESP_OK ? ap.rssi : -127;
-    serial_channel_t test_channels[9];
-    bool serial_test;
-    portENTER_CRITICAL(&s_sample_lock);
-    memcpy(test_channels, s_serial_channels, sizeof(test_channels));
-    serial_test = s_serial_test_enabled;
-    portEXIT_CRITICAL(&s_sample_lock);
     cJSON *root = cJSON_CreateObject(); if (!root) return false;
     cJSON *caps = cJSON_AddObjectToObject(root, "capabilities");
     cJSON *status = cJSON_AddObjectToObject(root, "status");
@@ -415,36 +243,117 @@ static bool telemetry_json(uint64_t sequence, char *buffer, size_t capacity) {
     cJSON_AddNumberToObject(root,"sequence",(double)sequence);
     cJSON_AddNumberToObject(root,"uptime_ms",(double)uptime_ms());
     cJSON_AddNumberToObject(root,"sample_age_ms",0);
-    cJSON_AddStringToObject(root,"firmware","web-client-0.2.0");
+    cJSON_AddStringToObject(root,"firmware",WEB_CLIENT_FIRMWARE);
     cJSON_AddBoolToObject(caps,"telemetry",true); cJSON_AddBoolToObject(caps,"events",true);
-    cJSON_AddBoolToObject(caps,"command_poll",true); cJSON_AddBoolToObject(caps,"weight",false);
-    cJSON_AddBoolToObject(caps,"actuator",false); cJSON_AddBoolToObject(caps,"simulation",false);
-    cJSON_AddBoolToObject(caps,"test_input",WEB_CLIENT_SERIAL_TEST != 0);
+    cJSON_AddBoolToObject(caps,"command_poll",true); cJSON_AddBoolToObject(caps,"weight",weight_enabled);
+    cJSON_AddBoolToObject(caps,"actuator",pumps.initialized); cJSON_AddBoolToObject(caps,"simulation",false);
+    cJSON_AddBoolToObject(caps,"test_input",false);
     cJSON_AddNumberToObject(status,"upload_interval_ms",interval); cJSON_AddNumberToObject(status,"config_version",version);
+    cJSON_AddNumberToObject(status,"last_http_ms",s_http_ms);
+    cJSON_AddNumberToObject(status,"weight_service_version",2);
     cJSON_AddNumberToObject(status,"free_heap_bytes",esp_get_free_heap_size()); cJSON_AddNumberToObject(status,"wifi_rssi",rssi);
-    cJSON_AddStringToObject(status,"task_state","idle");
+    cJSON_AddStringToObject(status,"task_state",pumps.fault_latched ? "error" : dose.active ? "dosing" : pumps.output_enabled ? "debug" : "idle");
+    cJSON *d=cJSON_AddObjectToObject(status,"dosing");
+    if(!d) { cJSON_Delete(root); return false; }
+    cJSON_AddBoolToObject(d,"supported",dose.initialized);
+    cJSON_AddBoolToObject(d,"active",dose.active);
+    cJSON_AddBoolToObject(d,"positions_saved",dose.positions_saved);
+    cJSON_AddNumberToObject(d,"vessel_us",dose.vessel_us);
+    cJSON_AddNumberToObject(d,"waste_us",dose.waste_us);
+    cJSON_AddNumberToObject(d,"position_version",dose.position_version);
+    cJSON_AddNumberToObject(d,"run_id",dose.run_id);
+    cJSON_AddStringToObject(d,"state",dosing_state_name(dose.state));
+    cJSON_AddStringToObject(d,"error",dosing_error_name(dose.error));
+    cJSON_AddNumberToObject(d,"step",dose.step);
+    cJSON_AddNumberToObject(d,"step_count",dose.step_count);
+    cJSON_AddNumberToObject(d,"delivered_mg",dose.delivered_mg);
+    cJSON_AddNumberToObject(d,"source_loss_mg",dose.source_loss_mg);
+    cJSON_AddNumberToObject(d,"flow_mg_s",dose.flow_mg_s);
+    cJSON_AddNumberToObject(d,"jogs",dose.jogs);
+    cJSON *dose_values=cJSON_AddArrayToObject(d,"dose_mg");
+    if(!dose_values) { cJSON_Delete(root); return false; }
+    for(unsigned i=0;i<dose.step_count;++i)cJSON_AddItemToArray(dose_values,cJSON_CreateNumber(dose.dose_mg[i]));
     cJSON *channels = cJSON_AddArrayToObject(status,"channels");
     if (!channels) { cJSON_Delete(root); return false; }
     for (int i=0;i<9;i++) {
         cJSON *c=cJSON_CreateObject(); if (!c) { cJSON_Delete(root); return false; }
         cJSON_AddNumberToObject(c,"channel",i);
-        if (serial_test && test_channels[i].valid) {
-            cJSON_AddNumberToObject(c,"mass_mg",test_channels[i].mass_mg);
-            cJSON_AddNumberToObject(c,"filtered_mg",test_channels[i].filtered_mg);
-            cJSON_AddBoolToObject(c,"valid",true);
-            cJSON_AddBoolToObject(c,"stable",test_channels[i].stable);
-            cJSON_AddNumberToObject(c,"age_ms",test_channels[i].age_ms);
+        weight_service_status_t weight = weights[i];
+        if (weight.enabled) {
+            cJSON_AddBoolToObject(c,"enabled",true);
+            cJSON_AddBoolToObject(c,"initialized",weight.initialized);
+            if (weight.raw_valid) {
+                cJSON_AddNumberToObject(c,"raw_count",weight.raw_count);
+                cJSON_AddNumberToObject(c,"average_raw",weight.average_raw);
+            } else {
+                cJSON_AddNullToObject(c,"raw_count"); cJSON_AddNullToObject(c,"average_raw");
+            }
+            if (weight.valid) {
+                cJSON_AddNumberToObject(c,"mass_mg",weight.mass_mg);
+                cJSON_AddNumberToObject(c,"filtered_mg",weight.filtered_mg);
+                cJSON_AddNumberToObject(c,"control_mg",weight.control_mg);
+                if(weight.stable)cJSON_AddNumberToObject(c,"stable_mg",weight.stable_mg);
+                else cJSON_AddNullToObject(c,"stable_mg");
+            } else {
+                cJSON_AddNullToObject(c,"mass_mg"); cJSON_AddNullToObject(c,"filtered_mg");
+            }
+            cJSON_AddBoolToObject(c,"valid",weight.valid);
+            cJSON_AddBoolToObject(c,"stable",weight.stable);
+            cJSON_AddBoolToObject(c,"calibration_ready",weight.calibration_ready);
+            cJSON_AddBoolToObject(c,"saved",weight.saved);
+            cJSON_AddNumberToObject(c,"noise_mg",weight.noise_mg);
+            cJSON_AddNumberToObject(c,"raw_band",weight.raw_band);
+            cJSON_AddNumberToObject(c,"noise_band_mg",weight.noise_band_mg);
+            cJSON_AddNumberToObject(c,"sample_period_ms",weight.sample_period_ms);
+            cJSON_AddNumberToObject(c,"sample_sequence",weight.sample_sequence);
+            cJSON_AddNumberToObject(c,"window_ms",weight.window_ms);
+            cJSON_AddNumberToObject(c,"filter_delay_ms",weight.filter_delay_ms);
+            cJSON_AddStringToObject(c,"storage_error",esp_err_to_name(weight.storage_error));
+            cJSON_AddNumberToObject(c,"age_ms",weight.age_ms);
+            cJSON_AddBoolToObject(c,"calibrated",weight.calibrated);
+            cJSON_AddBoolToObject(c,"tare_ready",weight.tare_ready);
+            cJSON_AddNumberToObject(c,"calibration_version",weight.version);
+            cJSON_AddNumberToObject(c,"samples",weight.samples);
+            cJSON_AddStringToObject(c,"last_error",esp_err_to_name(weight.last_error));
         } else {
+            cJSON_AddBoolToObject(c,"enabled",false);
             cJSON_AddNullToObject(c,"mass_mg"); cJSON_AddNullToObject(c,"filtered_mg");
             cJSON_AddBoolToObject(c,"valid",false); cJSON_AddBoolToObject(c,"stable",false);
-            cJSON_AddNumberToObject(c,"age_ms",serial_test ? test_channels[i].age_ms : 0);
+            cJSON_AddNumberToObject(c,"age_ms",60000);
         }
         cJSON_AddItemToArray(channels,c);
     }
     cJSON *a=cJSON_AddObjectToObject(status,"actuator");
     if (!a) { cJSON_Delete(root); return false; }
-    cJSON_AddNumberToObject(a,"channel",0); cJSON_AddNumberToObject(a,"requested_percent",0); cJSON_AddNumberToObject(a,"applied_percent",0);
-    cJSON_AddStringToObject(a,"output","hardware_pending");
+    int active = 0;
+    for(int i=0;i<ACTUATOR_PUMP_COUNT;++i)if(pumps.duty_percent[i])active=i;
+    unsigned applied = pumps.output_enabled ? pumps.duty_percent[active] : 0;
+    cJSON_AddNumberToObject(a,"channel",active);
+    cJSON_AddNumberToObject(a,"requested_percent",applied);
+    cJSON_AddNumberToObject(a,"applied_percent",applied);
+    cJSON_AddStringToObject(a,"output",pumps.initialized ? "pca9685" : "hardware_pending");
+    cJSON_AddNumberToObject(a,"config_version",pumps.config_version);
+    cJSON_AddNumberToObject(a,"pwm_hz",pumps.pwm_hz);
+    cJSON_AddNumberToObject(a,"maximum_percent",pumps.maximum_percent);
+    cJSON_AddNumberToObject(a,"minimum_percent",pumps.minimum_percent);
+    cJSON_AddNumberToObject(a,"remaining_ms",pumps.remaining_ms_by_channel[active]);
+    cJSON_AddBoolToObject(a,"auxiliaries_supported",pumps.auxiliaries_enabled);
+    cJSON_AddNumberToObject(a,"air_percent",pumps.duty_percent[8]);
+    cJSON_AddNumberToObject(a,"servo_pulse_us",pumps.servo_pulse_us);
+    cJSON_AddNumberToObject(a,"air_remaining_ms",pumps.remaining_ms_by_channel[8]);
+    cJSON_AddNumberToObject(a,"servo_remaining_ms",pumps.remaining_ms_by_channel[9]);
+    cJSON_AddBoolToObject(a,"parallel_supported",true);
+    cJSON_AddBoolToObject(a,"fault_latched",pumps.fault_latched);
+    cJSON_AddBoolToObject(a,"shutdown_failed",pumps.shutdown_failed);
+    cJSON_AddBoolToObject(a,"registers_verified",pumps.registers_verified);
+    cJSON_AddStringToObject(a,"last_error",esp_err_to_name(pumps.last_error));
+    cJSON *duties = cJSON_AddArrayToObject(a,"duty_percent");
+    cJSON *remaining = cJSON_AddArrayToObject(a,"remaining_ms_by_channel");
+    if (!duties || !remaining) { cJSON_Delete(root); return false; }
+    for (int i = 0; i < ACTUATOR_PUMP_COUNT; ++i) {
+        cJSON_AddItemToArray(duties,cJSON_CreateNumber(pumps.output_enabled ? pumps.duty_percent[i] : 0));
+        cJSON_AddItemToArray(remaining,cJSON_CreateNumber(pumps.remaining_ms_by_channel[i]));
+    }
     bool ok=cJSON_PrintPreallocated(root,buffer,capacity,false); cJSON_Delete(root); return ok;
 }
 
@@ -452,22 +361,25 @@ static bool telemetry_json(uint64_t sequence, char *buffer, size_t capacity) {
 // 函数名：telemetry_task
 // 作用：上报、启动事件重试与退避。周期配置仅 RAM 生效，不写 NVS。
 // 参数：arg，未使用；用于独立低优先级任务，栈与缓冲留在内部 RAM。
-// 使用示例：xTaskCreate(telemetry_task, "telemetry", 8192, NULL, 4, NULL)。
+// 使用示例：xTaskCreate(telemetry_task, "telemetry", 16384, NULL, 4, &s_telemetry_task)。
 /////////////////////////////////////////////////////////////////////////////
 static void telemetry_task(void *arg) {
-    (void)arg; char payload[4096], reply[512], event[384];
+    (void)arg; char payload[12288], reply[512], event[384];
+    esp_http_client_handle_t client = NULL;
     uint64_t sequence=0; bool announced=false; uint32_t backoff=1000;
-    snprintf(event,sizeof(event),"{\"schema_version\":1,\"device_id\":\"%s\",\"boot_id\":\"%s\",\"event_id\":\"boot-%s\",\"type\":\"boot\",\"payload\":{\"firmware\":\"web-client-0.2.0\"}}",WEB_CLIENT_DEVICE_ID,s_boot,s_boot);
+    snprintf(event,sizeof(event),"{\"schema_version\":1,\"device_id\":\"%s\",\"boot_id\":\"%s\",\"event_id\":\"boot-%s\",\"type\":\"boot\",\"payload\":{\"firmware\":\"%s\"}}",WEB_CLIENT_DEVICE_ID,s_boot,s_boot,WEB_CLIENT_FIRMWARE);
     for (;;) {
         xEventGroupWaitBits(s_events,CONNECTED_BIT,pdFALSE,pdFALSE,portMAX_DELAY);
         int status=0;
-        esp_err_t err=telemetry_json(sequence++,payload,sizeof(payload)) ? post_json("/device/telemetry",payload,reply,sizeof(reply),5000,&status) : ESP_ERR_NO_MEM;
+        int64_t cycle_started = uptime_ms();
+        esp_err_t err=telemetry_json(sequence++,payload,sizeof(payload)) ? post_json(&client,"/device/telemetry",payload,reply,sizeof(reply),5000,&status) : ESP_ERR_NO_MEM;
+        s_http_ms = (uint32_t)(uptime_ms() - cycle_started);
         if (err==ESP_OK) {
             cJSON *r=cJSON_Parse(reply);
             bool accepted=cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(r,"accepted")); cJSON_Delete(r);
             if (accepted) {
                 xEventGroupSetBits(s_events,REGISTERED_BIT); backoff=1000;
-                if (!announced) announced=post_json("/device/events",event,reply,sizeof(reply),5000,NULL)==ESP_OK;
+                if (!announced) announced=post_json(&client,"/device/events",event,reply,sizeof(reply),5000,NULL)==ESP_OK;
             } else err=ESP_FAIL;
         }
         uint32_t interval;
@@ -477,15 +389,138 @@ static void telemetry_task(void *arg) {
             ESP_LOGW(TAG,"upload failed: %s HTTP=%d",esp_err_to_name(err),status);
             interval=backoff; if(backoff<16000)backoff*=2;
         }
-        vTaskDelay(pdMS_TO_TICKS(interval));
+        int64_t elapsed = uptime_ms() - cycle_started;
+        uint32_t delay_ms = err == ESP_OK ? (elapsed < interval ? interval - (uint32_t)elapsed : 1) : interval;
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(delay_ms) ? pdMS_TO_TICKS(delay_ms) : 1);
     }
 }
 
+#if WEB_CLIENT_PUMP_CONTROL
+/////////////////////////////////////////////////////////////////////////////
+// 函数名：process_pump_command
+// 作用：将已核对设备/boot/时效的控制命令转为有界执行器请求。
+// 参数1：command，借用 JSON；参数2：result，回执输出；参数3：capacity，缓冲字节数。
+// 用于：仅 command_task 调用；服务器鉴权后仍核对序号、会话、版本、范围和租约。
+// 使用示例：process_pump_command(command, result, sizeof(result))；返回 NULL 表示成功。
+/////////////////////////////////////////////////////////////////////////////
+static const char *process_pump_command(cJSON *command, char *result, size_t capacity) {
+    cJSON *sequence = cJSON_GetObjectItemCaseSensitive(command,"control_sequence");
+    if (!number_in(sequence,1,9007199254740991.0)) return "invalid_control_sequence";
+    uint64_t seq = (uint64_t)sequence->valuedouble;
+    if (seq <= s_control_sequence) return "stale_control_sequence";
+    s_control_sequence = seq;
+    cJSON *type = cJSON_GetObjectItemCaseSensitive(command,"type");
+    cJSON *payload = cJSON_GetObjectItemCaseSensitive(command,"payload");
+    cJSON *channel = cJSON_GetObjectItemCaseSensitive(payload,"channel");
+    int target = -1;
+    esp_err_t err;
+    if (same_string(type,"stop")) {
+        if (!channel) err = dosing_service_cancel();
+        else {
+            if (!number_in(channel,0,7)) return "invalid_pump_request";
+            target = (int)channel->valuedouble;
+            actuator_status_t current;
+            actuator_get_status(&current);
+            actuator_request_t request = {
+                .source = ACTUATOR_SOURCE_REMOTE_DEBUG, .config_version = current.config_version,
+                .channel = (uint8_t)target, .duty_percent = 0,
+            };
+            dosing_service_status_t dose; dosing_service_get_status(&dose);
+            err = dose.active ? dosing_service_cancel() : actuator_set(&request);
+        }
+    } else {
+        bool auxiliary = same_string(type,"aux_apply");
+        cJSON *percent = cJSON_GetObjectItemCaseSensitive(payload,"value_percent");
+        cJSON *pulse = cJSON_GetObjectItemCaseSensitive(payload,"pulse_us");
+        cJSON *version = cJSON_GetObjectItemCaseSensitive(payload,"expected_config_version");
+        cJSON *lease = cJSON_GetObjectItemCaseSensitive(command,"lease_deadline_uptime_ms");
+        if (!number_in(channel,auxiliary ? 8 : 0,auxiliary ? 9 : 7) ||
+            ((auxiliary && channel->valuedouble==9) ? (!number_in(pulse,500,2500) || percent!=NULL) :
+             (!number_in(percent,0,100) || pulse!=NULL)) ||
+            !number_in(version,1,UINT32_MAX) ||
+            !valid_id(cJSON_GetObjectItemCaseSensitive(payload,"session_id"))) return "invalid_pump_request";
+        target = (int)channel->valuedouble;
+        int64_t now = uptime_ms();
+        if (!number_in(lease,now + 1,now + 6000)) return "debug_session_expired";
+        actuator_request_t request = {
+            .source = ACTUATOR_SOURCE_REMOTE_DEBUG,
+            .config_version = (uint32_t)version->valuedouble,
+            .channel = (uint8_t)channel->valuedouble,
+            .duty_percent = percent ? (uint8_t)percent->valuedouble : 0,
+            .pulse_us = pulse ? (uint16_t)pulse->valuedouble : 0,
+            .duration_ms = 5000,
+            .expires_at_ms = (int64_t)cJSON_GetObjectItemCaseSensitive(command,"deadline_uptime_ms")->valuedouble,
+            .stop_at_ms = (int64_t)lease->valuedouble,
+        };
+        err = actuator_set(&request);
+    }
+    if (err != ESP_OK) return esp_err_to_name(err);
+    actuator_status_t pumps;
+    actuator_get_status(&pumps);
+    unsigned applied = pumps.output_enabled && target >= 0 ? pumps.duty_percent[target] : 0;
+    uint32_t remaining = target >= 0 ? pumps.remaining_ms_by_channel[target] : 0;
+    snprintf(result,capacity,"{\"applied_value_percent\":%u,\"applied_pulse_us\":%u,\"applied_config_version\":%"PRIu32
+             ",\"maximum_run_ms\":5000,\"remaining_ms\":%"PRIu32",\"registers_verified\":%s}",
+             applied,pumps.servo_pulse_us,pumps.config_version,remaining,pumps.registers_verified ? "true" : "false");
+    return NULL;
+}
+#endif
+
+// 配液参数显式传入并逐项限界；命令完成只表示本地任务接受，最终结果看遥测。
+#if WEB_CLIENT_OUTLET_CONTROL && WEB_CLIENT_HX711_SCALE1
+static const char *process_dosing_command(cJSON *command, char *result, size_t capacity) {
+    cJSON *sequence=cJSON_GetObjectItemCaseSensitive(command,"control_sequence");
+    if(!number_in(sequence,1,9007199254740991.0))return "invalid_control_sequence";
+    uint64_t seq=(uint64_t)sequence->valuedouble;
+    if(seq<=s_control_sequence)return "stale_control_sequence";
+    s_control_sequence=seq;
+    cJSON *type=cJSON_GetObjectItemCaseSensitive(command,"type"), *payload=cJSON_GetObjectItemCaseSensitive(command,"payload");
+    cJSON *version=cJSON_GetObjectItemCaseSensitive(payload,"expected_position_version");
+    if(!number_in(version,1,INT32_MAX-1))return "invalid_position_version";
+    esp_err_t err;
+    if(same_string(type,"outlet_configure")) {
+        cJSON *v=cJSON_GetObjectItemCaseSensitive(payload,"vessel_us"), *w=cJSON_GetObjectItemCaseSensitive(payload,"waste_us");
+        if(!number_in(v,500,2500)||!number_in(w,500,2500)||v->valuedouble==w->valuedouble)return "invalid_servo_positions";
+        err=dosing_service_save_positions((uint32_t)version->valuedouble,(uint16_t)v->valuedouble,(uint16_t)w->valuedouble);
+    } else {
+        dosing_config_t config={0};
+        cJSON *params=cJSON_GetObjectItemCaseSensitive(payload,"config");
+#define PARAM(name, low, high) do { cJSON *v=cJSON_GetObjectItemCaseSensitive(params,#name); \
+    if(!number_in(v,low,high)) { return "invalid_dosing_config"; } config.name=v->valuedouble; } while(0)
+        PARAM(version,1,INT32_MAX); PARAM(minimum_percent,40,100); PARAM(fast_percent,40,100);
+        PARAM(slow_percent,40,100); PARAM(fine_percent,40,100); PARAM(air_percent,1,100);
+        PARAM(route_ms,100,5000); PARAM(purge_ms,100,10000); PARAM(settle_min_ms,200,60000);
+        PARAM(settle_timeout_ms,201,60000); PARAM(step_timeout_ms,1000,600000);
+        PARAM(total_timeout_ms,1000,3600000); PARAM(no_flow_ms,500,600000);
+        PARAM(pulse_min_ms,60,1000); PARAM(pulse_max_ms,60,1000); PARAM(max_jogs,1,100); PARAM(tail_ms,0,5000);
+        PARAM(slow_margin_mg,1,10000000); PARAM(fine_margin_mg,1,10000000); PARAM(compensation_mg,0,10000000);
+        PARAM(max_flow_mg_s,1,10000000); PARAM(progress_mg,1,1000000); PARAM(residual_limit_mg,0,10000000);
+        PARAM(balance_tolerance_mg,1,1000000); PARAM(vessel_capacity_mg,1,1000000000); PARAM(purge_leak_tolerance_mg,1,1000000);
+#undef PARAM
+        if(!dosing_config_valid(&config))return "invalid_dosing_config";
+        cJSON *array=cJSON_GetObjectItemCaseSensitive(payload,"steps");
+        int count=cJSON_GetArraySize(array); dosing_step_t steps[8];
+        if(!cJSON_IsArray(array)||count<1||count>8)return "invalid_dosing_steps";
+        for(int i=0;i<count;++i) {
+            cJSON *s=cJSON_GetArrayItem(array,i), *ch=cJSON_GetObjectItemCaseSensitive(s,"channel");
+            cJSON *t=cJSON_GetObjectItemCaseSensitive(s,"target_mg"), *tol=cJSON_GetObjectItemCaseSensitive(s,"tolerance_mg");
+            if(!number_in(ch,0,7)||!number_in(t,1,100000000)||!number_in(tol,1,10000000))return "invalid_dosing_steps";
+            steps[i]=(dosing_step_t){.channel=(uint8_t)ch->valuedouble,.target_mg=(int32_t)t->valuedouble,.tolerance_mg=(int32_t)tol->valuedouble};
+        }
+        err=dosing_service_start(&config,steps,(unsigned)count,(uint32_t)version->valuedouble);
+    }
+    if(err!=ESP_OK)return esp_err_to_name(err);
+    dosing_service_status_t s; dosing_service_get_status(&s);
+    snprintf(result,capacity,"{\"accepted\":true,\"position_version\":%"PRIu32",\"run_id\":%"PRIu32"}",s.position_version,s.run_id);
+    return NULL;
+}
+#endif
+
 /////////////////////////////////////////////////////////////////////////////
 // 函数名：process_command
-// 作用：验证身份、启动代次、有效期、幂等缓存和版本，只执行 ping/上报周期。
+// 作用：验证身份、启动代次、有效期、幂等缓存和版本，分发泵控制或称重校准。
 // 参数1：command，借用已解析 JSON；参数2：cached，接收缓存地址，禁止跨任务使用。
-// 用于：command_task；示例：process_command(c, &ack)，硬件命令一律拒绝。
+// 用于：command_task；示例：process_command(c, &ack)，回读成功后才返回完成。
 /////////////////////////////////////////////////////////////////////////////
 static bool process_command(cJSON *command, cached_ack_t **cached) {
     cJSON *id=cJSON_GetObjectItemCaseSensitive(command,"id"); if(!valid_id(id))return false;
@@ -495,6 +530,7 @@ static bool process_command(cJSON *command, cached_ack_t **cached) {
     cJSON *schema=cJSON_GetObjectItemCaseSensitive(command,"schema_version");
     cJSON *type=cJSON_GetObjectItemCaseSensitive(command,"type"), *payload=cJSON_GetObjectItemCaseSensitive(command,"payload");
     const char *reason=NULL; uint32_t applied=0, version=0;
+    char result[256] = "{\"ok\":true}";
     if(!number_in(schema,1,1) || !valid_id(cJSON_GetObjectItemCaseSensitive(command,"request_id")))reason="unsupported_schema";
     else if(!number_in(deadline,uptime_ms(),uptime_ms()+60000))reason="command_expired";
     else if(same_string(type,"set_upload_interval")) {
@@ -506,12 +542,55 @@ static bool process_command(cJSON *command, cached_ack_t **cached) {
             else {s_interval=(uint32_t)interval->valuedouble;s_version++;applied=s_interval;version=s_version;}
             portEXIT_CRITICAL(&s_config_lock);
         }
-    } else if(!same_string(type,"ping"))reason="hardware_control_pending";
+    }
+#if WEB_CLIENT_PUMP_CONTROL
+    else if(same_string(type,"debug_apply") || same_string(type,"aux_apply") || same_string(type,"stop")) {
+        reason = process_pump_command(command,result,sizeof(result));
+    }
+#endif
+#if WEB_CLIENT_OUTLET_CONTROL && WEB_CLIENT_HX711_SCALE1
+    else if(same_string(type,"outlet_configure") || same_string(type,"dosing_start")) {
+        reason=process_dosing_command(command,result,sizeof(result));
+    }
+#endif
+#if WEB_CLIENT_HX711_SCALE1
+    else if(same_string(type,"weight_tare") || same_string(type,"weight_calibrate") || same_string(type,"weight_reset") || same_string(type,"weight_configure")) {
+        cJSON *channel = cJSON_GetObjectItemCaseSensitive(payload,"channel");
+        cJSON *expected = cJSON_GetObjectItemCaseSensitive(payload,"expected_calibration_version");
+        cJSON *mass = cJSON_GetObjectItemCaseSensitive(payload,"reference_mg");
+        bool calibrate = same_string(type,"weight_calibrate");
+        bool configure = same_string(type,"weight_configure");
+        cJSON *raw_band = cJSON_GetObjectItemCaseSensitive(payload,"raw_band");
+        cJSON *noise_band = cJSON_GetObjectItemCaseSensitive(payload,"noise_band_mg");
+        if (!number_in(channel,0,8) || !number_in(expected,1,INT32_MAX) ||
+            (calibrate && !number_in(mass,1,1000000000)) ||
+            (configure && (!number_in(raw_band,1,100000) || !number_in(noise_band,1,10000)))) reason="invalid_weight_request";
+        else {
+            actuator_status_t pumps = {0};
+            dosing_service_status_t dose; dosing_service_get_status(&dose);
+#if WEB_CLIENT_PUMP_CONTROL
+            actuator_get_status(&pumps);
+#endif
+            esp_err_t err = (pumps.output_enabled || dose.active) ? ESP_ERR_INVALID_STATE :
+                calibrate ? weight_service_calibrate((unsigned)channel->valuedouble, (uint32_t)expected->valuedouble, (int32_t)mass->valuedouble) :
+                configure ? weight_service_configure((unsigned)channel->valuedouble, (uint32_t)expected->valuedouble,
+                                                    (uint32_t)raw_band->valuedouble, (uint32_t)noise_band->valuedouble) :
+                same_string(type,"weight_reset") ? weight_service_reset((unsigned)channel->valuedouble, (uint32_t)expected->valuedouble) :
+                            weight_service_tare((unsigned)channel->valuedouble, (uint32_t)expected->valuedouble);
+            if (err != ESP_OK) reason = pumps.output_enabled ? "pump_busy" : err == ESP_ERR_INVALID_STATE ? "weight_not_ready" : esp_err_to_name(err);
+            else {
+                weight_service_status_t weight;
+                weight_service_get_status((unsigned)channel->valuedouble, &weight);
+                snprintf(result,sizeof(result),"{\"calibration_version\":%"PRIu32",\"calibrated\":%s}",
+                         weight.version,weight.calibrated ? "true" : "false");
+            }
+        }
+    }
+#endif
+    else if(!same_string(type,"ping"))reason="hardware_control_pending";
     cached_ack_t *ack=&s_acks[s_ack_index++%8]; snprintf(ack->id,sizeof(ack->id),"%s",id->valuestring);
-    char result[160];
     if(reason)snprintf(result,sizeof(result),"{\"reason\":\"%s\"}",reason);
     else if(applied)snprintf(result,sizeof(result),"{\"applied_interval_ms\":%"PRIu32",\"applied_config_version\":%"PRIu32"}",applied,version);
-    else snprintf(result,sizeof(result),"{\"ok\":true}");
     snprintf(ack->body,sizeof(ack->body),"{\"schema_version\":1,\"device_id\":\"%s\",\"boot_id\":\"%s\",\"status\":\"%s\",\"result\":%s}",WEB_CLIENT_DEVICE_ID,s_boot,reason?"rejected":"completed",result);
     *cached=ack; return true;
 }
@@ -522,18 +601,20 @@ static bool process_command(cJSON *command, cached_ack_t **cached) {
 // 参数：arg，未使用；用于独立任务，不阻塞遥测。示例：xTaskCreate 创建。
 /////////////////////////////////////////////////////////////////////////////
 static void command_task(void *arg) {
-    (void)arg; char request[256], response[2048], ack_path[128]; uint32_t backoff=1000;
+    (void)arg; char request[256], response[4096], ack_path[128]; uint32_t backoff=1000;
+    esp_http_client_handle_t client = NULL;
     snprintf(request,sizeof(request),"{\"schema_version\":1,\"device_id\":\"%s\",\"boot_id\":\"%s\",\"wait_ms\":25000}",WEB_CLIENT_DEVICE_ID,s_boot);
     for (;;) {
         xEventGroupWaitBits(s_events,CONNECTED_BIT|REGISTERED_BIT,pdFALSE,pdTRUE,portMAX_DELAY);
-        esp_err_t err=post_json("/device/commands/poll",request,response,sizeof(response),30000,NULL);
+        esp_err_t err=post_json(&client,"/device/commands/poll",request,response,sizeof(response),30000,NULL);
         if(err==ESP_OK) {
             backoff=1000;
             cJSON *root=cJSON_Parse(response),*c=cJSON_GetObjectItemCaseSensitive(root,"command");
             cached_ack_t *ack=NULL;
             if(cJSON_IsObject(c)&&process_command(c,&ack)) {
                 snprintf(ack_path,sizeof(ack_path),"/device/commands/%s/ack",ack->id);
-                err=post_json(ack_path,ack->body,response,sizeof(response),5000,NULL);
+                err=post_json(&client,ack_path,ack->body,response,sizeof(response),5000,NULL);
+                if (s_telemetry_task) xTaskNotifyGive(s_telemetry_task);
                 ESP_LOGI(TAG,"command %s: acknowledgement %s",ack->id,err==ESP_OK?"confirmed":"pending retry");
             }
             cJSON_Delete(root);
@@ -544,14 +625,31 @@ static void command_task(void *arg) {
 
 /////////////////////////////////////////////////////////////////////////////
 // 函数名：app_main
-// 作用：启动网络固件；可选单路 HX711 原始串口探测，缺网络配置仍可采样。
+// 作用：初始化泵为全关，启动九路称重采集，再以无省电、HT20 的网络配置连接。
 // 参数：无；用于 WEB_CLIENT=1 profile；示例：ESP-IDF 自动调用。
 /////////////////////////////////////////////////////////////////////////////
 void app_main(void) {
-#if WEB_CLIENT_HX711_PROBE_CHANNEL >= 0
-    if (xTaskCreate(hx711_probe_task, "hx711_probe", 3072, NULL, 3, NULL) != pdPASS) {
-        ESP_LOGE(TAG, "HX711 raw probe task allocation failed");
-    }
+#if WEB_CLIENT_PUMP_CONTROL
+    const actuator_config_t pump_config = {
+        .version = ACTUATOR_CONFIG_VERSION, .pwm_hz = PUMP_PWM_HZ,
+        .maximum_percent = PUMP_MAX_PERCENT, .maximum_run_ms = 600000,
+        .minimum_percent = PUMP_MIN_PERCENT,
+#if WEB_CLIENT_OUTLET_CONTROL
+        .auxiliaries_enabled = true,
+#endif
+    };
+    esp_err_t pump_error = actuator_init(&pump_config);
+    if (pump_error != ESP_OK) ESP_LOGE(TAG,"Pump initialization failed: %s",esp_err_to_name(pump_error));
+#endif
+#if WEB_CLIENT_HX711_SCALE1
+    esp_err_t nvs_error = nvs_flash_init();
+    if (nvs_error != ESP_OK) ESP_LOGE(TAG,"NVS init: %s (no automatic erase)",esp_err_to_name(nvs_error));
+    esp_err_t weight_error = weight_service_start(HX711_ENABLED_MASK);
+    if (weight_error != ESP_OK) ESP_LOGE(TAG,"Weight initialization failed: %s",esp_err_to_name(weight_error));
+#endif
+#if WEB_CLIENT_OUTLET_CONTROL && WEB_CLIENT_HX711_SCALE1
+    esp_err_t dose_error = dosing_service_init();
+    if (dose_error != ESP_OK) ESP_LOGE(TAG,"Dosing initialization failed: %s",esp_err_to_name(dose_error));
 #endif
     const size_t ssid_length=strlen(WEB_CLIENT_WIFI_SSID), password_length=strlen(WEB_CLIENT_WIFI_PASSWORD), url_length=strlen(WEB_CLIENT_SERVER_URL);
     if(!ssid_length||ssid_length>32||password_length>63||strlen(WEB_CLIENT_DEVICE_TOKEN)<24||url_length<10||url_length>200) {
@@ -574,24 +672,22 @@ void app_main(void) {
     wifi_config_t config={0};
     memcpy(config.sta.ssid,WEB_CLIENT_WIFI_SSID,ssid_length); memcpy(config.sta.password,WEB_CLIENT_WIFI_PASSWORD,password_length);
     config.sta.threshold.authmode=password_length?WIFI_AUTH_WPA2_PSK:WIFI_AUTH_OPEN;
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA)); ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA,&config)); ESP_ERROR_CHECK(esp_wifi_start());
+    // 扫描全部信道后按 RSSI 选择同名 AP，避免快速扫描停在第一个较弱的热点。
+    config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+    config.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA,&config));
+    // 遥测无需 HT40 峰值吞吐，20 MHz 在拥挤的 2.4 GHz 环境中更合适。
+    ESP_ERROR_CHECK(esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE)); // 持续供电称重，关闭省电等待以降低交互延迟。
+    ESP_ERROR_CHECK(esp_wifi_set_max_tx_power(WEB_CLIENT_WIFI_TX_POWER_QDBM));
     if(s_https){esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);esp_sntp_setservername(0,"pool.ntp.org");esp_sntp_init();}
-    ESP_LOGI(TAG,"Network-only firmware; device=%s; hardware capabilities disabled%s",
-             WEB_CLIENT_DEVICE_ID,
-#if WEB_CLIENT_SERIAL_TEST
-             "; serial test input enabled"
-#else
-             ""
-#endif
-    );
+    ESP_LOGI(TAG,"Device=%s; real weighing telemetry every 200 ms",WEB_CLIENT_DEVICE_ID);
     if(xTaskCreate(connection_task,"wifi_connect",4096,NULL,3,NULL)!=pdPASS ||
-       xTaskCreate(telemetry_task,"telemetry",10240,NULL,4,NULL)!=pdPASS ||
-       xTaskCreate(command_task,"command_poll",8192,NULL,4,NULL)!=pdPASS) {
+       xTaskCreate(telemetry_task,"telemetry",20480,NULL,4,&s_telemetry_task)!=pdPASS ||
+       xTaskCreate(command_task,"command_poll",12288,NULL,4,NULL)!=pdPASS) {
         ESP_LOGE(TAG,"Network task allocation failed; stopping Wi-Fi"); esp_wifi_stop();
     }
-#if CONFIG_ESP_CONSOLE_UART && WEB_CLIENT_SERIAL_TEST
-    if (xTaskCreate(serial_test_task, "serial_test", 4096, NULL, 3, NULL) != pdPASS) {
-        ESP_LOGE(TAG, "Serial test task allocation failed");
-    }
-#endif
+
 }

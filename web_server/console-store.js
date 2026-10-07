@@ -18,7 +18,7 @@ function validateRecipe(body) {
   return { name: body.name.trim(), notes: body.notes, enabled: body.enabled, steps };
 }
 
-/** ConsoleStore：业务数据与遥测共用独立 SQLite；模拟流程只生成软件结果，不发送执行器命令。 */
+/** ConsoleStore：业务数据与遥测共用独立 SQLite；保存配方、人工标定记录与审计；不代替设备控制。 */
 class ConsoleStore {
   constructor(store, config) {
     this.store = store; this.db = store.db;
@@ -32,9 +32,8 @@ class ConsoleStore {
       CREATE TABLE IF NOT EXISTS console_users(username TEXT PRIMARY KEY, role TEXT, enabled INTEGER, revision INTEGER, salt TEXT, hash TEXT);
     `);
     if (!this.user(config.username)) this.writeUser(config.username, 'admin', true, config.password);
-    // 进程重启不根据墙钟补跑任务，保留实际已模拟的进度并明确标记中断。
+    // 旧任务保留历史，重启不补跑。
     for (const job of this.activeJobs()) this.finish(job, 'interrupted', 'server_restarted');
-    this.lastTick = performance.now();
   }
   /** transaction：业务更新与审计一起提交；fn 为同步 SQLite 操作。 */
   transaction(fn) {
@@ -51,7 +50,7 @@ class ConsoleStore {
     const limit = Number(query.limit || 100), offset = Number(query.offset || 0);
     requireValue(integer(after,0,Number.MAX_SAFE_INTEGER) && integer(before,after,Number.MAX_SAFE_INTEGER) && integer(limit,1,500) && integer(offset,0,1000000));
     return this.db.prepare('SELECT * FROM audits WHERE created_at>=? AND created_at<=? AND (?=\'\' OR action=?) ORDER BY id DESC LIMIT ? OFFSET ?')
-      .all(after,before,query.action || '',query.action || '',limit,offset).map(r => ({ ...r, payload: JSON.parse(r.payload) }));
+      .all(after,before,query.action || '',query.action || '',limit,offset).map(r => ({ ...r, payload: JSON.parse(r.payload) })).filter(r => r.target !== 'sim-001' && !r.action.startsWith('batch_') && r.payload.mode !== 'simulation');
   }
   user(username) {
     return this.db.prepare('SELECT username,role,enabled,revision FROM console_users WHERE username=?').get(username) || null;
@@ -120,14 +119,13 @@ class ConsoleStore {
         rowid >= COALESCE((SELECT rowid FROM calibrations WHERE device_id=? ORDER BY rowid DESC LIMIT 1 OFFSET 199), 0)
         OR rowid IN (SELECT MAX(rowid) FROM calibrations WHERE device_id=? GROUP BY channel)
       ) ORDER BY rowid DESC
-    `).all(deviceId,deviceId,deviceId).map(decode);
+    `).all(deviceId,deviceId,deviceId).map(decode).filter(r => r.source !== 'simulation');
   }
   /** saveCalibration：两点 ADC 标定计算及测量记录归档；不下发 ESP、不改变遥测。 */
   saveCalibration(device, body, actor) {
     requireValue(integer(body.channel,0,8) && integer(body.zero_raw,-8388608,8388607) && integer(body.loaded_raw,-8388608,8388607));
     requireValue(body.zero_raw !== body.loaded_raw && integer(body.known_mass_mg,1,100000000));
-    requireValue(typeof body.notes === 'string' && body.notes.length <= 500 && ['manual','simulation'].includes(body.source));
-    requireValue(body.source !== 'simulation' || device.simulation);
+    requireValue(typeof body.notes === 'string' && body.notes.length <= 500 && body.source === 'manual');
     const old = decode(this.db.prepare('SELECT payload FROM calibrations WHERE device_id=? AND channel=? ORDER BY version DESC LIMIT 1').get(device.id,body.channel));
     if (body.expected_version !== (old?.version || 0)) throw new ApiError(409,'calibration_version_conflict');
     const record = { id:crypto.randomUUID(),device_id:device.id,channel:body.channel,version:(old?.version || 0)+1,
@@ -136,69 +134,17 @@ class ConsoleStore {
       notes:body.notes,created_at:Date.now(),author:actor };
     return this.transaction(() => { this.db.prepare('INSERT INTO calibrations VALUES(?,?,?,?,?)').run(record.id,device.id,record.channel,record.version,JSON.stringify(record)); this.audit(actor,'calibration_recorded',device.id,{channel:record.channel,version:record.version}); return record; });
   }
-  jobs() { return this.db.prepare('SELECT payload FROM batches ORDER BY created_at DESC LIMIT 200').all().map(decode); }
-  job(id) { return decode(this.db.prepare('SELECT payload FROM batches WHERE id=?').get(id)); }
-  activeJobs() { return this.db.prepare("SELECT payload FROM batches WHERE state IN ('running','settling')").all().map(decode); }
+  jobs() { return this.db.prepare('SELECT payload FROM batches ORDER BY created_at DESC LIMIT 200').all().map(decode).filter(j => j.mode !== 'simulation' && this.store.device(j.device_id)); }
+  job(id) { return this.jobs().find(j => j.id === id) || null; }
+  activeJobs() { return this.jobs().filter(j => ACTIVE.includes(j.state)); }
   activeJob(deviceId) { return this.activeJobs().find(j => j.device_id === deviceId); }
   saveJob(job) { this.db.prepare('INSERT INTO batches VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state,payload=excluded.payload').run(job.id,job.device_id,job.request_id,job.state,job.created_at,JSON.stringify(job)); return job; }
-  /** startJob：固定配方/配置/称重初值，拒绝并发及库存不足；request_id 重试不新建批次。 */
-  startJob(body, actor) {
-    requireValue(identifier(body.device_id) && identifier(body.recipe_id) && identifier(body.request_id) && integer(body.recipe_version,1,2147483647));
-    const old = decode(this.db.prepare('SELECT payload FROM batches WHERE request_id=?').get(body.request_id));
-    if (old) {
-      if (old.device_id !== body.device_id || old.recipe.id !== body.recipe_id || old.recipe.version !== body.recipe_version) throw new ApiError(409,'request_id_conflict');
-      return old;
-    }
-    const d = this.store.device(body.device_id);
-    if (!d) throw new ApiError(404,'device_not_found');
-    if (!d.simulation) throw new ApiError(409,'simulation_only');
-    if (!d.online) throw new ApiError(409,'device_offline');
-    if (this.activeJob(d.id) || d.status.actuator.applied_percent > 0 || this.store.commands(d.id).some(c => ['queued','delivered'].includes(c.state) && c.expires_at > Date.now())) throw new ApiError(409,'device_busy');
-    const recipe = this.recipe(body.recipe_id);
-    if (!recipe?.enabled) throw new ApiError(409,'recipe_not_ready');
-    if (recipe.version !== body.recipe_version) throw new ApiError(409,'recipe_version_conflict');
-    for (const s of recipe.steps) {
-      const c = d.status.channels[s.channel];
-      if (!c.valid || !c.stable || c.age_ms > 5000 || c.filtered_mg < s.target_mg) throw new ApiError(409,'insufficient_inventory');
-    }
-    if (!d.status.channels[8].valid || !d.status.channels[8].stable) throw new ApiError(409,'sensor_not_ready');
-    const job = { id:crypto.randomUUID(),request_id:body.request_id,device_id:d.id,recipe,config_version:d.status.config_version,
-      mode:'simulation',state:'running',step_index:0,progress:0,results:recipe.steps.map(s => ({...s,actual_mg:0,error_mg:null})),
-      baseline_mg:d.status.channels.map(c => c.filtered_mg),created_at:Date.now(),updated_at:Date.now(),author:actor,settled_ms:0 };
-    return this.transaction(() => { this.saveJob(job); this.audit(actor,'batch_started',job.id,{recipe_id:recipe.id,version:recipe.version,mode:'simulation'}); return job; });
-  }
+  /** startJob：真实闭环配液尚未实现，明确拒绝执行；不生成软件剂量。 */
+  startJob() { throw new ApiError(409,'automatic_dosing_not_supported'); }
   finish(job, state, reason, actor = 'system') {
     return this.transaction(() => { job.state=state; job.reason=reason; job.updated_at=Date.now(); job.finished_at=job.updated_at; this.saveJob(job); this.audit(actor,'batch_'+state,job.id,{reason}); return job; });
   }
   stopJob(id, actor) { const job=this.job(id); if (!job) throw new ApiError(404,'job_not_found'); return ACTIVE.includes(job.state) ? this.finish(job,'cancelled','user_cancelled',actor) : job; }
-  /** tick：按单调时钟每次最多推进 1 秒；10 g/s 串行软件模型，不代表真实计量性能。 */
-  tick() {
-    const now=performance.now(), elapsed=Math.max(0,Math.min(1000,now-this.lastTick)); this.lastTick=now;
-    for (const job of this.activeJobs()) {
-      const result=job.results[job.step_index];
-      if (job.state === 'running') {
-        result.actual_mg=Math.min(result.target_mg,result.actual_mg+Math.round(elapsed*10));
-        if (result.actual_mg === result.target_mg) { job.state='settling'; job.settled_ms=0; }
-      } else {
-        job.settled_ms+=elapsed;
-        if (job.settled_ms >= result.settle_ms) {
-          result.error_mg=result.actual_mg-result.target_mg; job.step_index++;
-          if (job.step_index === job.results.length) { job.progress=100; this.finish(job,'completed','simulation_finished'); continue; }
-          job.state='running';
-        }
-      }
-      job.progress=Math.min(99,Math.floor(job.results.reduce((n,s)=>n+s.actual_mg,0)/job.results.reduce((n,s)=>n+s.target_mg,0)*100));
-      job.updated_at=Date.now(); this.saveJob(job);
-    }
-  }
-  /** simulatedSnapshot：给 HTTP 模拟器生成批次对应的九路重量与单路输出；只在本进程模拟器调用。 */
-  simulatedSnapshot(deviceId) {
-    const job=this.jobs().find(j=>j.device_id===deviceId); if (!job) return null;
-    const masses=job.baseline_mg.slice();
-    for(const result of job.results) { masses[result.channel]-=result.actual_mg; masses[8]+=result.actual_mg; }
-    return { masses, state:ACTIVE.includes(job.state) ? job.state:'idle', channel:job.results[Math.min(job.step_index,job.results.length-1)].channel,
-      duty:job.state==='running' ? 50:0, active:ACTIVE.includes(job.state) };
-  }
   exportData() { return {schema_version:1,exported_at:Date.now(),recipes:this.recipes(),calibrations:this.store.identities.flatMap(d=>this.calibrations(d.id)),batches:this.jobs(),audit:this.audits({limit:500}),limits:{batches:200,calibrations_per_device:200,audit:500}}; }
 }
 module.exports={ConsoleStore,validateRecipe,roles};

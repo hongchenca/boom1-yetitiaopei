@@ -54,8 +54,8 @@ function consoleRoute({p,req,res,url,body,user,send,business,store}) {
     send(res,200,business.exportData(),{'Content-Disposition':'attachment; filename="yetitiaopei-records.json"'});return true;
   }
   if(p==='/diagnostics' && get) {
-    send(res,200,{version:'0.3.0',node:process.version,hardware_control:false,simulation_rate_g_s:10,
-      retention:{telemetry_hours:24,commands_days:7},devices:store.devices().map(d=>({id:d.id,online:d.online,simulation:d.simulation,age_ms:d.age_ms,firmware:d.firmware})),
+    send(res,200,{version:'0.5.1',node:process.version,hardware_control:true,telemetry_push:'on_receive',default_upload_ms:200,
+      retention:{telemetry_hours:24,commands_days:7},devices:store.devices().map(d=>({id:d.id,online:d.online,age_ms:d.age_ms,firmware:d.firmware})),
       counts:{recipes:business.recipes().length,active_batches:business.activeJobs().length},base_path:url.pathname.slice(0,-'/api/v1/diagnostics'.length)});return true;
   }
   return false;

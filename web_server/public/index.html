@@ -3,58 +3,166 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>液体定量调配控制台</title>
+  <meta name="theme-color" content="#f5f6f2">
+  <title>液体定量调配 · YETI</title>
   <link rel="stylesheet" href="app.css">
 </head>
 <body>
+  <svg class="icon-library" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
+    <symbol id="i-mark" viewBox="0 0 32 32"><path d="M16 3C12 9 6 14 6 20a10 10 0 0 0 20 0C26 14 20 9 16 3Z"/><path d="M7 21c5-7 13 7 18 0M11 14l5 5 5-5M16 19v8"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></symbol>
+    <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M6 3v5m0 4v9M18 3v9m0 4v5M3 8h6v4H3zM15 12h6v4h-6z"/></symbol>
+    <symbol id="i-recipe" viewBox="0 0 24 24"><rect x="5" y="3" width="15" height="18" rx="2"/><path d="M9 8h7M9 12h7M9 16h4M3 7h3M3 12h3M3 17h3"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="m9 3-1 3-3 1-2 5 2 5 3 1 1 3h6l1-3 3-1 2-5-2-5-3-1-1-3Z"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 10a8 8 0 1 0-2 8M20 4v6h-6"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="3"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/></symbol>
+  </defs></svg>
   <div id="login" class="login-shell">
-    <div class="login-card">
-      <div class="brand-mark">Y</div>
-      <p class="eyebrow">YETITIAOPEI · LAN CONSOLE</p>
-      <h1>液体定量调配控制台</h1>
-      <p class="muted">本机 / 局域网联调版本</p>
-      <p class="login-help">首次登录：请在本机 <code>web_server/data/connection.json</code> 查看用户名和密码。</p>
-      <form id="login-form">
-        <label>用户名<input id="username" value="admin" autocomplete="username" required></label>
-        <label>密码<input id="password" type="password" autocomplete="current-password" required></label>
-        <button class="primary" type="submit">进入控制台</button>
-        <p id="login-error" class="error"></p>
-      </form>
+    <div class="login-story">
+      <div class="login-brand"><span class="brand-mark"><svg class="icon"><use href="#i-mark"/></svg></span><span>YETI<span class="brand-divider">/</span>液体定量调配</span></div>
+      <div class="login-statement"><p class="eyebrow">PRECISION IN EVERY DROP</p><h2>每一克，<br>恰到好处<span>。</span></h2><p>称重 · 控制 · 配方，一处掌握。</p></div>
+      <div class="instrument-art" aria-hidden="true">
+        <svg viewBox="0 0 580 300" fill="none"><defs><pattern id="art-grid" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" fill="#a9c6b6" opacity=".22"/></pattern><linearGradient id="liquid" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#cbe8aa" stop-opacity=".5"/><stop offset="1" stop-color="#cbe8aa" stop-opacity=".06"/></linearGradient></defs><rect width="580" height="300" fill="url(#art-grid)"/><g stroke="#9dbaa8" stroke-width="1"><path d="M50 65h125v40h70m285-40H405v40h-70M50 225h125v-40h70m285 40H405v-40h-70" opacity=".45"/><circle cx="290" cy="150" r="126" stroke-dasharray="2 9" opacity=".4"/><circle cx="290" cy="150" r="108" opacity=".2"/><path d="M250 78v28l-30 94a14 14 0 0 0 14 19h112a14 14 0 0 0 14-19l-30-94V78M242 78h96" stroke="#dce7d3" stroke-width="2"/><path d="M238 148c35-18 64 18 104 0l16 52a12 12 0 0 1-12 17H234a12 12 0 0 1-12-17Z" fill="url(#liquid)" stroke="#c9e6a9"/><path d="M305 116h15m-15 20h15m-15 20h15m-15 20h15m-15 20h15" opacity=".7"/><path d="M278 51h24m-12-12v24M278 250h24m-12-12v24" opacity=".4"/></g><g fill="#cbe8aa"><circle cx="50" cy="65" r="4"/><circle cx="530" cy="65" r="4"/><circle cx="50" cy="225" r="4"/><circle cx="530" cy="225" r="4"/></g></svg>
+      </div>
+      <div class="login-story-foot"><span>YETITIAOPEI</span><span>MEASURE. MIX. REPEAT.</span></div>
+    </div>
+    <div class="login-form-side">
+      <div class="login-card">
+        <p class="eyebrow">YOUR WORKSPACE</p><h1>登录工作台</h1><p class="muted">欢迎回来，开始今天的工作。</p>
+        <form id="login-form">
+          <label for="username">用户名</label><input id="username" value="admin" autocomplete="username" required>
+          <label for="password">密码</label><div class="password-field"><input id="password" type="password" autocomplete="current-password" required><button id="password-toggle" type="button" class="password-toggle" aria-label="显示密码" aria-pressed="false">显示</button></div>
+          <button id="login-submit" class="primary login-submit" type="submit">进入工作台 <svg class="icon"><use href="#i-arrow"/></svg></button>
+          <p id="login-error" class="error" role="alert"></p>
+        </form>
+        <details class="login-help"><summary>首次登录？</summary><p>请向管理员获取账号。管理员可在本机 <code>web_server/data/connection.json</code> 查看登录信息。</p></details>
+      </div>
+      <span class="login-footer">液体定量调配控制系统</span>
     </div>
   </div>
   <div id="app" class="app-shell hidden">
+    <a class="skip-link" href="#main">跳到主要内容</a>
     <header class="topbar">
-      <div class="brand"><span class="brand-mark small">Y</span><span><b>液体定量调配</b><small>LOCAL INDUSTRIAL CONSOLE</small></span></div>
-      <div class="top-actions"><span id="server-state" class="connection-dot offline">后台连接中</span><button id="logout" class="ghost">退出</button></div>
+      <div class="brand"><span class="brand-mark small"><svg class="icon"><use href="#i-mark"/></svg></span><span><b>液体定量调配</b><small>YETI / WORKSPACE</small></span></div>
+      <div class="device-picker"><span class="device-indicator" aria-hidden="true"></span><select id="device-select" aria-label="当前设备"></select></div>
+      <div class="top-actions"><span id="server-state" class="connection-dot offline" role="status">连接中</span><button id="stop-top" class="danger"><svg class="icon"><use href="#i-stop"/></svg>停止全部泵</button><button id="logout" class="ghost">退出</button></div>
     </header>
     <div class="layout">
-      <aside class="sidebar">
-        <div class="section-caption">工作台</div>
-        <button class="nav active" data-tab="overview">总览 <span>⌂</span></button>
-        <button class="nav" data-tab="debug">实时调试 <span>⌁</span></button>
-        <button class="nav" data-tab="recipes">配方与配液 <span>▤</span></button>
-        <button class="nav" data-tab="records">记录与告警 <span>◷</span></button>
-        <div class="section-caption settings-caption">系统</div>
-        <button class="nav" data-tab="settings">连接设置 <span>⚙</span></button>
-        <div class="sidebar-foot"><span class="pulse"></span> 实时通信联调<br><small>泵与称重硬件尚未接入</small></div>
+      <aside class="sidebar" aria-label="主导航">
+        <div class="section-caption">工作空间 <span>01—05</span></div>
+        <nav>
+          <button class="nav active" data-tab="overview" aria-current="page"><svg class="icon"><use href="#i-grid"/></svg><span>运行总览</span><span class="nav-index">01</span></button>
+          <button class="nav" data-tab="debug"><svg class="icon"><use href="#i-sliders"/></svg><span>设备操作</span><span class="nav-index">02</span></button>
+          <button class="nav" data-tab="recipes"><svg class="icon"><use href="#i-recipe"/></svg><span>配方管理</span><span class="nav-index">03</span></button>
+          <button class="nav" data-tab="records"><svg class="icon"><use href="#i-clock"/></svg><span>操作记录</span><span class="nav-index">04</span></button>
+          <button class="nav" data-tab="settings"><svg class="icon"><use href="#i-settings"/></svg><span>连接设置</span><span class="nav-index">05</span></button>
+        </nav>
+        <div class="sidebar-foot"><svg class="icon"><use href="#i-mark"/></svg><span>有序调配，从容掌控。</span><small>YETITIAOPEI CONSOLE</small></div>
       </aside>
-      <main class="main">
-        <section id="overview" class="tab active">
-          <div class="page-heading"><div><p class="eyebrow">OVERVIEW / 设备总览</p><h2>运行总览</h2><p class="muted">查看设备状态、称重样本和当前执行回执</p></div><div class="page-actions"><select id="device-select"></select><button id="refresh" class="secondary">刷新</button><button id="stop-top" class="danger">停止输出</button></div></div>
-          <div id="notice" class="notice info">正在读取设备状态…</div>
-          <p id="overview-result" class="muted result-line" role="status" aria-live="polite"></p>
-          <div class="summary-grid"><div class="summary-card"><span>连接设备</span><strong id="summary-online">—</strong><small>在线 / 已注册</small></div><div class="summary-card"><span>设备模式</span><strong id="summary-mode">—</strong><small id="summary-firmware">—</small></div><div class="summary-card"><span>当前任务</span><strong id="summary-task">—</strong><small id="summary-updated">—</small></div><div class="summary-card"><span>硬件能力</span><strong id="summary-capability">—</strong><small>当前仅网络与模拟器</small></div></div>
-          <div class="panel"><div class="panel-title"><div><h3>八路原液称重</h3><p>实机尚未接入称重时显示无数据；模拟样本用于界面调试</p></div><span id="sample-age" class="tag">—</span></div><div id="channel-grid" class="channel-grid"></div><div class="center-scale"><div><span>中央调配容器 · CH 08</span><strong id="center-mass">—</strong></div><span id="center-quality" class="tag">等待样本</span></div></div>
-          <div class="bottom-grid"><div class="panel"><div class="panel-title"><div><h3>实时样本曲线</h3><p>原始值 / 滤波值 · 单位 g · 最多 180 点</p></div><select id="chart-channel" aria-label="曲线通道"></select></div><canvas id="chart" width="800" height="220" aria-label="称重趋势"></canvas><div class="chart-legend"><span class="raw">原始值</span><span class="filtered">滤波值</span></div></div><div class="panel actuator-panel"><div class="panel-title"><div><h3>执行器回执</h3><p>页面请求不等于设备已执行</p></div></div><div id="actuator-state" class="actuator-state">等待设备回报</div><button id="stop-panel" class="danger full">停止模拟输出</button></div></div>
+      <main id="main" class="main" tabindex="-1">
+        <div class="global-feedback"><p id="overview-result" class="global-result result-line" role="status" aria-live="polite"></p><button id="dismiss-result" class="feedback-dismiss" aria-label="关闭操作提示">×</button></div>
+        <div class="connection-feedback"><div id="notice" class="notice info" role="status">正在读取设备状态…</div><button id="reconnect" class="secondary hidden" type="button">重新连接</button></div>
+        <section id="overview" class="tab active" aria-labelledby="overview-title">
+          <div class="page-heading"><div><p class="eyebrow">WORKSPACE / 01</p><h2 id="overview-title" tabindex="-1">运行总览<span class="heading-dot">.</span></h2></div><div class="page-actions"><button id="refresh" class="secondary"><svg class="icon"><use href="#i-refresh"/></svg>刷新状态</button><button class="primary" data-open-tab="debug">设备操作 <svg class="icon"><use href="#i-arrow"/></svg></button></div></div>
+          <div class="summary-grid">
+            <div class="summary-card"><span>在线设备 <svg class="icon"><use href="#i-grid"/></svg></span><strong id="summary-online">—</strong><small>在线 / 已注册</small></div>
+            <div class="summary-card"><span>设备模式</span><strong id="summary-mode">—</strong><small id="summary-firmware">—</small></div>
+            <div class="summary-card"><span>运行状态</span><strong id="summary-task">—</strong><small id="summary-updated">—</small></div>
+            <div class="summary-card"><span>已接入能力</span><strong id="summary-capability">—</strong><small id="summary-capability-note">等待设备上报</small></div>
+          </div>
+          <div class="weighing-grid">
+            <div class="panel channels-panel"><div class="panel-title"><div><p class="eyebrow">SOURCE CHANNELS</p><h3>原液称重 <span class="count-badge">08</span></h3></div><div class="measurement-tools"><select id="display-mode" class="compat-select" aria-label="Display filter (compatibility)" aria-hidden="true" tabindex="-1"></select><div id="display-mode-buttons" class="segmented-buttons" role="group" aria-label="Display filter"></div><span id="sample-age" class="tag">—</span></div></div><div id="channel-grid" class="channel-grid"></div><div class="panel-foot"><span>选择通道查看曲线</span><span>单位 / g</span></div></div>
+            <div class="panel center-scale"><div class="panel-title"><div><p class="eyebrow">MIXING VESSEL</p><h3>中央调配容器</h3></div><span class="channel-code">CH 08</span></div><div class="vessel-mark" aria-hidden="true"><span></span><i></i><i></i><i></i></div><div class="center-reading"><span>当前净重</span><strong id="center-mass">—</strong><span id="center-quality" class="tag">等待样本</span></div><button class="center-action" data-open-tab="debug" data-weight-channel="8">容器去皮 / 校准 <svg class="icon"><use href="#i-arrow"/></svg></button></div>
+          </div>
+          <div class="bottom-grid">
+            <div class="panel chart-panel"><div class="panel-title"><div><p class="eyebrow">LIVE TREND</p><h3>重量趋势</h3></div><div class="chart-controls"><label class="checkbox-line"><input id="chart-raw" type="checkbox">原始对照</label><select id="chart-channel" class="compat-select" aria-label="Trend channel (compatibility)" aria-hidden="true" tabindex="-1"></select><div id="chart-channel-buttons" class="channel-picker-buttons" role="group" aria-label="Trend channel"></div></div></div><canvas id="chart" width="800" height="220" role="img" aria-label="称重趋势"></canvas><div class="chart-legend"><span class="raw hidden">原始值</span><span class="filtered">显示重量</span><span class="legend-unit">g · 最近 180 点</span></div></div>
+            <div class="panel actuator-panel"><div class="panel-title"><div><p class="eyebrow">PUMP STATUS</p><h3>泵运行状态</h3></div><svg class="icon"><use href="#i-sliders"/></svg></div><div id="actuator-state" class="actuator-state">等待设备回报</div><button class="secondary full" data-open-tab="debug">手动控制 <svg class="icon"><use href="#i-arrow"/></svg></button><button id="stop-panel" class="danger full"><svg class="icon"><use href="#i-stop"/></svg>停止全部泵</button></div>
+          </div>
         </section>
-        <section id="debug" class="tab"><div class="page-heading"><div><p class="eyebrow">DEBUG / 实时调试</p><h2>联调参数</h2><p class="muted">ESP32 可先验证上报周期与通信回执；输出点动仅限模拟设备</p></div></div><div class="debug-grid"><div class="panel"><div class="panel-title"><div><h3>设备上报周期</h3><p id="reported-interval">等待设备上报</p></div><span class="tag blue">会话内生效</span></div><div class="form-row"><label>周期 <input id="interval-input" type="number" min="200" max="10000" step="100"> ms</label><button id="apply-interval" class="primary">应用周期</button></div><p class="muted">200～10000 ms；只在设备内存中应用，重启恢复 1000 ms。</p><button id="ping" class="secondary">验证命令回执</button><p id="interval-result" class="muted result-line" role="status"></p></div><div class="panel"><div class="panel-title"><div><h3>模拟输出点动</h3><p>每次最多 5 秒，由模拟设备自行归零</p></div><span class="tag orange">模拟设备</span></div><label>通道 <select id="debug-channel"></select></label><label class="range-label">输出 <output id="debug-value">0%</output><input id="debug-slider" type="range" min="0" max="100" value="0"></label><div class="button-row"><button id="apply-debug" class="primary">模拟运行 5 秒</button><button id="stop-debug" class="secondary">停止</button></div><p id="debug-result" class="muted result-line" role="status"></p></div></div><div class="panel capability-panel"><h3>设备能力声明</h3><div id="capabilities"></div></div></section>
-        <section id="recipes" class="tab"><div class="page-heading"><div><p class="eyebrow">RECIPES / 自动配液</p><h2>配方与配液</h2><p class="muted">配方先保存版本，再在模拟设备上运行；真实泵控制保持关闭。</p></div><div class="page-actions"><button id="recipe-new" class="secondary">新建配方</button><button id="recipe-refresh" class="secondary">刷新</button></div></div><div class="business-grid"><div class="panel"><div class="panel-title"><div><h3>配方列表</h3><p>保存后生成不可变版本快照</p></div></div><div id="recipe-list" class="recipe-list"></div></div><div class="panel"><div class="panel-title"><div><h3 id="recipe-form-title">编辑配方</h3><p id="recipe-version-label">新配方 · 版本 0</p></div></div><form id="recipe-form"><input id="recipe-id" type="hidden"><label>名称<input id="recipe-name" maxlength="64" required></label><label class="checkbox-line"><input id="recipe-enabled" type="checkbox" checked>允许用于模拟批次</label><label>备注<textarea id="recipe-notes" maxlength="500" rows="2"></textarea></label><div class="step-table"><div class="step-head"><span>通道</span><span>目标 mg</span><span>容差 mg</span><span>稳定 ms</span><span></span></div><div id="recipe-steps"></div></div><div class="button-row"><button class="primary" type="submit">保存版本</button><button id="recipe-delete" class="danger" type="button">删除</button></div><p id="recipe-result" class="result-line muted" role="status"></p></form></div></div><div class="panel"><div class="panel-title"><div><h3>模拟批次</h3><p>按配方顺序推进，页面显示每路目标/实际/误差</p></div><span id="batch-tag" class="tag orange">未运行</span></div><div class="form-row"><label>设备<select id="batch-device"></select></label><label>配方<select id="batch-recipe"></select></label><button id="batch-start" class="primary">开始模拟批次</button><button id="batch-stop" class="danger">停止</button></div><div id="batch-status" class="batch-status">暂无批次</div></div></section>
-        <section id="records" class="tab"><div class="page-heading"><div><p class="eyebrow">RECORDS / EVENTS</p><h2>记录、标定与审计</h2><p class="muted">所有记录写入本机专用 SQLite；导出不包含设备密钥。</p></div><div class="page-actions"><button id="reload-events" class="secondary">刷新记录</button><button id="export-records" class="secondary">导出记录</button></div></div><div class="panel"><div class="panel-title"><h3>最近设备事件与命令</h3></div><div id="events" class="events"></div></div><div class="business-grid"><div class="panel"><div class="panel-title"><div><h3>两点标定记录</h3><p>仅保存记录和计算系数，不下发 ESP</p></div></div><form id="calibration-form"><div class="form-row"><label>通道<input id="cal-channel" type="number" min="0" max="8" value="0" required></label><label>零点 raw<input id="cal-zero" type="number" value="0" required></label><label>砝码 raw<input id="cal-loaded" type="number" value="1000" required></label></div><div class="form-row"><label>已知质量 mg<input id="cal-mass" type="number" min="1" value="10000" required></label><label>来源<select id="cal-source"><option value="simulation">模拟</option><option value="manual">人工</option></select></label></div><label>备注<textarea id="cal-notes" rows="2" maxlength="500"></textarea></label><button class="primary" type="submit">保存标定记录</button><p id="cal-result" class="result-line muted" role="status"></p></form></div><div class="panel"><div class="panel-title"><div><h3>操作审计</h3><p>登录、配方、批次、标定和导出操作</p></div></div><div id="audit-list" class="events"></div></div></div></section>
-        <section id="settings" class="tab"><div class="page-heading"><div><p class="eyebrow">SETTINGS / CONNECTION</p><h2>连接设置与诊断</h2><p class="muted">当前服务运行在开发电脑，可使用电脑局域网 IP 访问</p></div><div class="page-actions"><button id="diagnostics-refresh" class="secondary">刷新诊断</button></div></div><div class="panel settings-list"><div><span>访问地址</span><strong id="access-url">—</strong></div><div><span>数据库</span><strong>本机专用 SQLite · WAL</strong></div><div><span>服务边界</span><strong>设备主动上报 / 25 秒命令长轮询</strong></div><div><span>安全状态</span><strong id="account-state">登录已启用 · 实机密钥校验 · HTTPS 交付前配置</strong></div></div><div class="panel"><div class="panel-title"><div><h3>诊断摘要</h3><p>用于本机联调和交付前核对</p></div></div><pre id="diagnostics" class="diagnostics">等待诊断数据</pre></div></section>
+        <section id="debug" class="tab" aria-labelledby="debug-title">
+          <div class="page-heading"><div><p class="eyebrow">CONTROL / 02</p><h2 id="debug-title" tabindex="-1">设备操作<span class="heading-dot">.</span></h2></div><span class="page-note">称重校准与手动泵控制</span></div>
+          <div class="panel weight-panel"><div class="panel-title"><div><p class="eyebrow">WEIGHT CALIBRATION</p><h3>称重校准</h3></div><div class="calibration-summary-tools"><span class="tag">9 &#x8def; / &#x6821;&#x51c6;&#x72ec;&#x7acb;&#x4fdd;&#x5b58;</span><select id="weight-channel" class="compat-select" aria-label="Calibration channel (compatibility)" aria-hidden="true" tabindex="-1"></select></div></div>
+            <div class="weight-readout"><div><span class="muted">当前净重</span><h2 id="weight-mass">—</h2></div><p id="weight-state" class="muted">等待设备</p></div>
+            <div id="calibration-channel-grid" class="calibration-channel-grid" aria-label="Nine channel calibration"></div><div class="calibration-flow legacy-calibration-controls"><div class="calibration-step"><span class="step-number">01</span><div><h4>空载去皮</h4><p>移除秤上物品，等待读数稳定。</p><button id="weight-tare" class="secondary" disabled>空载去皮</button></div></div><div class="calibration-step"><span class="step-number">02</span><div><h4>砝码校准</h4><p>放上已知砝码，稳定后校准。</p><div class="reference-row"><label class="input-unit"><input id="weight-reference" aria-label="砝码质量（g）" type="number" min="0.001" max="1000000" step="0.001" placeholder="砝码质量" required><span>g</span></label><button id="weight-calibrate" class="primary" disabled>按砝码校准</button></div></div></div></div>
+            <p id="weight-action-hint" class="field-note" role="status"></p>
+            <p id="weight-result" class="result-line muted" role="status"></p>
+            <details class="maintenance"><summary>稳定阈值与校准维护</summary><p class="muted">参数保存到设备；泵运行时不可修改。</p><div class="form-row"><label>未校准范围 · counts<input id="weight-raw-band" type="number" min="1" max="100000" value="200" required></label><label>重量稳定范围 · mg<input id="weight-noise-band" type="number" min="1" max="10000" value="50" required></label></div><div class="button-row"><button id="weight-configure" class="secondary" disabled>保存稳定阈值</button><button id="weight-reset" class="danger" disabled>清除本路校准</button></div></details>
+            <details class="maintenance"><summary>传感器诊断</summary><p id="weight-device-reading" class="muted"></p><p id="weight-raw" class="muted">等待称重数据</p><p id="weight-latency" class="muted"></p></details>
+          </div>
+          <div class="panel pump-control-panel"><div class="panel-title"><div><p class="eyebrow">MANUAL CONTROL</p><h3>八路泵独立控制</h3><p>每路分别设置输出、启动和停止；支持多路同时运行。</p></div><div class="page-actions"><span id="debug-mode" class="tag">等待设备</span><button id="stop-debug" class="danger">停止全部泵</button></div></div>
+            <p id="pump-control-hint" class="field-note" role="status">等待设备上报。</p>
+            <div id="pump-channel-grid" class="pump-channel-grid" aria-label="八路泵独立控制"></div>
+            <p class="field-note">每路每次最多运行 5 秒，到时独立停止；刷新网页不会自动启动。</p><p id="debug-result" class="muted result-line" role="status"></p>
+          </div>
+          <div class="panel" id="outlet-panel"><div class="panel-title"><div><p class="eyebrow">OUTLET / CH8 + CH9</p><h3>出口调试</h3><p>调整脉宽 → 试运行 → 记下两个位置 → 停止后保存。</p></div><button id="outlet-stop" class="danger">停止全部输出</button></div>
+            <p id="outlet-status" role="status">等待支持出口控制的固件</p>
+            <div class="outlet-grid">
+              <div class="outlet-card"><h4>CH9 · 舵机位置</h4>
+                <label>待试脉宽 · µs<input id="servo-pulse" type="number" min="500" max="2500" step="1" value="1500" required></label>
+                <input id="servo-slider" type="range" min="500" max="2500" step="10" value="1500" aria-label="舵机脉宽滑块">
+                <div class="button-row"><button id="servo-minus" class="secondary">−10 µs</button><button id="servo-plus" class="secondary">+10 µs</button><button id="servo-test" class="primary">试此位置 · 5 秒</button></div>
+                <p class="field-note">滑块只调整待试值；点击试运行才发送。确认流路正确后记下位置。</p>
+                <div class="position-grid">
+                  <div><label>配液位置 · µs<input id="servo-vessel" type="number" readonly placeholder="尚未记录"></label><button id="servo-mark-vessel" class="secondary">记为配液位置</button></div>
+                  <div><label>废液位置 · µs<input id="servo-waste" type="number" readonly placeholder="尚未记录"></label><button id="servo-mark-waste" class="secondary">记为废液位置</button></div>
+                </div>
+                <div class="button-row"><button id="outlet-save" class="primary">保存两个位置</button><button id="servo-go-vessel" class="secondary">试已存配液位置</button><button id="servo-go-waste" class="secondary">试已存废液位置</button></div>
+                <p id="outlet-save-hint" class="field-note">两个位置记录后，停止输出或等待测试结束，再保存。</p>
+              </div>
+              <div class="outlet-card"><h4>CH8 · 气泵</h4><label>测试输出 · %<input id="air-duty" type="number" min="1" max="100" value="60" required></label><button id="air-test" class="secondary">吹气测试 · 5 秒</button>
+                <p class="field-note">先将出口切至废液口。测试到时停止，也可用上方按钮立即全停。</p>
+                <details class="maintenance"><summary>频率与停机说明</summary><p class="field-note">这块 PCA9685 的所有通道共用 50 Hz，每路独立设置占空比或脉宽。液泵起转下限需在此频率实测；停舵机信号不代表机械复位。</p></details>
+              </div>
+            </div>
+            <p id="outlet-result" class="result-line muted" role="status"></p>
+          </div>
+          <div class="panel" id="dosing-panel"><div class="panel-title"><div><p class="eyebrow">LOCAL CLOSED LOOP</p><h3>闭环配液联调</h3><p>中央秤决定实际剂量；源秤核验库存、损失和残液。每步合格后切废液口并限时吹气。</p></div></div>
+            <p id="dosing-status" role="status">等待设备</p>
+            <div class="button-row"><button id="dose-use-recipe" class="secondary">载入配方管理中选中的配方</button><button id="dose-add-step" class="secondary">＋ 添加原液</button></div>
+            <p id="dose-recipe-name" class="field-note">临时配方 · 最多 8 步，按顺序逐路加液。</p>
+            <div id="dose-steps"></div>
+            <details class="maintenance"><summary>闭环参数 · 按实际泵与管路调整</summary><p class="field-note">以下为联调起始值。精加输出应高于实测起转下限。参数修改仅用于下一批；源秤应读出剩余液体净重，中央秤应在放好空容器后去皮。</p><div id="dose-settings"></div></details>
+            <p id="dose-ready" class="field-note" role="status"></p>
+            <label class="checkbox-line"><input id="dose-confirm" type="checkbox">已核对两位置、空载去皮/砝码校准、源液库存、容器容量及控制参数</label>
+            <div class="button-row"><button id="dose-start" class="primary">开始配液</button><button id="dose-stop" class="danger">取消并全停</button></div>
+            <p id="dose-result" class="result-line muted" role="status"></p>
+          </div>
+          <div class="debug-grid">
+            <div class="panel"><div class="panel-title"><div><p class="eyebrow">CONNECTION</p><h3>数据更新</h3></div><span class="tag">本次开机有效</span></div><p id="reported-interval" class="muted">等待设备上报</p><div class="form-row"><label>上报周期 · ms<input id="interval-input" type="number" min="200" max="10000" step="100" required></label><button id="apply-interval" class="primary">应用周期</button></div><p class="field-note">200～10000 ms，重启恢复 200 ms。</p><button id="ping" class="secondary">检测设备响应</button><p id="interval-result" class="muted result-line" role="status"></p></div>
+          </div>
+          <details class="panel capability-panel"><summary>设备接入能力</summary><div id="capabilities"></div></details>
+        </section>
+        <section id="recipes" class="tab" aria-labelledby="recipes-title">
+          <div class="page-heading"><div><p class="eyebrow">RECIPES / 03</p><h2 id="recipes-title" tabindex="-1">配方管理<span class="heading-dot">.</span></h2></div><div class="page-actions"><button id="recipe-refresh" class="secondary" aria-label="刷新配方"><svg class="icon"><use href="#i-refresh"/></svg>刷新</button><button id="recipe-new" class="primary"><svg class="icon"><use href="#i-plus"/></svg>新建配方</button></div></div>
+          <div class="notice neutral">配方保存后，可在“实时调试 → 闭环配液联调”载入并核对参数。任务结果以设备遥测为准。</div>
+          <div class="business-grid"><div class="panel recipe-library"><div class="panel-title"><div><p class="eyebrow">YOUR COLLECTION</p><h3>我的配方</h3></div><span id="recipe-count" class="count-badge">0</span></div><div id="recipe-list" class="recipe-list"></div></div>
+            <div class="panel recipe-editor"><div class="panel-title"><div><h3 id="recipe-form-title">新建配方</h3><p id="recipe-version-label">尚未保存</p></div></div><form id="recipe-form"><input id="recipe-id" type="hidden"><div class="recipe-name-row"><label>配方名称<input id="recipe-name" maxlength="64" placeholder="例如：基础配方 A" required></label><label class="checkbox-line"><input id="recipe-enabled" type="checkbox" checked>启用</label></div><label>备注 <span class="optional">选填</span><textarea id="recipe-notes" maxlength="500" rows="2" placeholder="记录配方用途或注意事项"></textarea></label><div class="step-table"><div class="step-head"><span>原液通道</span><span>目标 · mg</span><span>容差 · mg</span><span>稳定 · ms</span><span></span></div><div id="recipe-steps"></div></div><div class="editor-footer"><button class="primary" type="submit">保存配方</button><button id="recipe-delete" class="ghost danger-text" type="button">删除配方</button></div><p id="recipe-result" class="result-line muted" role="status"></p></form></div>
+          </div>
+        </section>
+        <section id="records" class="tab" aria-labelledby="records-title">
+          <div class="page-heading"><div><p class="eyebrow">ACTIVITY / 04</p><h2 id="records-title" tabindex="-1">操作记录<span class="heading-dot">.</span></h2></div><div class="page-actions"><button id="reload-events" class="secondary"><svg class="icon"><use href="#i-refresh"/></svg>刷新</button><button id="export-records" class="primary"><svg class="icon"><use href="#i-download"/></svg>导出记录</button></div></div>
+          <div class="panel"><div class="panel-title"><div><p class="eyebrow">DEVICE EVENTS</p><h3>设备事件</h3></div><span class="tag">最近记录</span></div><div id="events" class="events"></div></div>
+          <div class="business-grid records-grid"><div class="panel"><div class="panel-title"><div><p class="eyebrow">ACTIVITY LOG</p><h3>操作审计</h3></div></div><div id="audit-list" class="events"></div></div>
+            <details class="panel calibration-records"><summary>人工标定记录</summary><p class="field-note">仅保存标定记录，不修改设备校准。</p><form id="calibration-form"><div class="form-row"><label>通道<input id="cal-channel" type="number" min="0" max="8" value="0" required></label><label>零点 · raw<input id="cal-zero" type="number" value="0" required></label><label>砝码读数 · raw<input id="cal-loaded" type="number" value="1000" required></label></div><div class="form-row"><label>已知质量 · mg<input id="cal-mass" type="number" min="1" value="10000" required></label><label>来源<input id="cal-source" value="manual" aria-label="Source" readonly></label></div><label>备注<textarea id="cal-notes" rows="2" maxlength="500"></textarea></label><button class="primary" type="submit">保存标定记录</button><p id="cal-result" class="result-line muted" role="status"></p></form></details>
+          </div>
+        </section>
+        <section id="settings" class="tab" aria-labelledby="settings-title">
+          <div class="page-heading"><div><p class="eyebrow">PREFERENCES / 05</p><h2 id="settings-title" tabindex="-1">连接设置<span class="heading-dot">.</span></h2></div><div class="page-actions"><button id="diagnostics-refresh" class="secondary"><svg class="icon"><use href="#i-refresh"/></svg>刷新诊断</button></div></div>
+          <div class="panel"><div class="panel-title"><div><p class="eyebrow">CONNECTION DETAILS</p><h3>当前连接</h3></div></div><div class="settings-list"><div><span>访问地址</span><strong id="access-url">—</strong></div><div><span>数据存储</span><strong>本机保存</strong></div><div><span>设备连接</span><strong>自动接收设备上报</strong></div><div><span>账号状态</span><strong id="account-state">已登录</strong></div></div></div>
+          <details class="panel"><summary>技术诊断</summary><pre id="diagnostics" class="diagnostics">等待诊断数据</pre></details>
+        </section>
+        <footer class="workspace-footer"><span>YETI<span>/</span>液体定量调配</span><span>专注每一次精准调配</span></footer>
       </main>
     </div>
   </div>
+  <script src="weight-filter.js"></script>
   <script src="app.js"></script>
+  <script src="dosing-config.js"></script>
+  <script src="outlet.js"></script>
   <script src="console.js"></script>
 </body>
 </html>

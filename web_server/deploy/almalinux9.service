@@ -1,0 +1,26 @@
+[Unit]
+Description=Yetitiaopei console
+After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=yetitiaopei
+Group=yetitiaopei
+WorkingDirectory=/opt/yetitiaopei/app
+ExecStart=/opt/yetitiaopei/runtime/bin/node /opt/yetitiaopei/app/deploy/manage.cjs start
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=20
+Environment=LANG=C.UTF-8
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/yetitiaopei
+
+[Install]
+WantedBy=multi-user.target

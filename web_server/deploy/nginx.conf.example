@@ -1,15 +1,17 @@
-# 由客户合并到自己的 HTTPS server 块，不替换任何已有配置。
-# APP_BASE_PATH=/console；代理保留前缀，端口以客户分配为准。
+# 合并到客户已有 HTTPS server 块；先 nginx -t，再重载。
+# 适用于 Nginx 在宿主机、APP_BASE_PATH=/console 的默认部署。
+# 客户若修改监听端口，也要同步下方 18080。proxy_pass 不带尾部 /。
 location = /console {
     return 302 /console/;
 }
-location /console/ {
-    proxy_pass http://127.0.0.1:8000;
+location ^~ /console/ {
+    proxy_pass http://127.0.0.1:18080;
     proxy_http_version 1.1;
     proxy_set_header Host $http_host;
     proxy_set_header Connection "";
     proxy_buffering off;
     proxy_cache off;
-    proxy_read_timeout 40s;
+    proxy_read_timeout 60s;
+    proxy_send_timeout 60s;
     client_max_body_size 32k;
 }
